@@ -1,0 +1,6 @@
+logs/*
+state/*
+tmp/*
+backup/*
+*.log
+*.tmp
