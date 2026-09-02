@@ -148,6 +148,11 @@ cleanup() {
             kill -KILL "$child" 2>/dev/null || true
         fi
     done
+      # Clear API runtime cooldown/backoff state on STOP.
+      if declare -F api_guard_cleanup >/dev/null 2>&1; then
+          api_guard_cleanup || true
+      fi
+
 
     rm -f "$PID_FILE" 2>/dev/null || true
     rm -f "$STOP_FILE" 2>/dev/null || true

@@ -37,31 +37,23 @@ error_guard_success() {
 
 
 safe_engine_run() {
-
     local name="$1"
     local function="$2"
 
     if ! declare -F "$function" >/dev/null 2>&1; then
-
         error_guard_log \
             "FUNCTION_MISSING" \
             "$name function=$function"
-
         return 1
     fi
 
-    if timeout "${ENGINE_TIMEOUT:-12}" \
-        bash -c "
-            source '$ROOT/lib/core.sh' 2>/dev/null || true
-        " >/dev/null 2>&1
-    then
-        :
-    fi
+    # The actual API timeout is handled by lib/api_guard.sh.
+    # Do not use a separate timeout subprocess here because the
+    # engine function runs in the parent shell and must return
+    # its state variables to rider.sh.
 
     if "$function"; then
-
         error_guard_success
-
         return 0
     fi
 

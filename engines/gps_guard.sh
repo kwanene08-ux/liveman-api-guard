@@ -17,7 +17,16 @@ GPS_RECOVERIES=0
 GPS_COOLDOWN_UNTIL="${GPS_COOLDOWN_UNTIL:-0}"
 GPS_LAST_PROBE="${GPS_LAST_PROBE:-0}"
 GPS_PROBE_INTERVAL="${GPS_PROBE_INTERVAL:-30}"
+
+# Network location is no longer called every rider round.
+GPS_NETWORK_LAST_POLL="${GPS_NETWORK_LAST_POLL:-0}"
+GPS_NETWORK_POLL_INTERVAL="${GPS_NETWORK_POLL_INTERVAL:-20}"
+GPS_NETWORK_COOLDOWN_UNTIL="${GPS_NETWORK_COOLDOWN_UNTIL:-0}"
+GPS_NETWORK_COOLDOWN="${GPS_NETWORK_COOLDOWN:-30}"
+
 GPS_LAST_SOURCE="${GPS_LAST_SOURCE:-NONE}"
+GPS_LAST_RC="${GPS_LAST_RC:-0}"
+GPS_LAST_OUTPUT="${GPS_LAST_OUTPUT:-}"
 
 gps_valid_json() {
     printf '%s' "$1" | jq -e '
@@ -36,7 +45,6 @@ gps_cache_age() {
     }
 
     local now mtime
-
     now="$(date +%s)"
     mtime="$(stat -c %Y "$STATE_DIR/gps.state" 2>/dev/null || echo 0)"
 
@@ -78,8 +86,8 @@ gps_set_quality() {
 gps_apply_output() {
     local output="$1"
 
-    GPS_LAT="$(printf '%s' "$output" | jq -r '.latitude')"
-    GPS_LON="$(printf '%s' "$output" | jq -r '.longitude')"
+    GPS_LAT="$(printf '%s' "$output" | jq -r '.latitude // "--"')"
+    GPS_LON="$(printf '%s' "$output" | jq -r '.longitude // "--"')"
     GPS_ACC="$(printf '%s' "$output" | jq -r '.accuracy // "--"')"
     GPS_SPEED="$(printf '%s' "$output" | jq -r '.speed // "--"')"
     GPS_PROVIDER="$(printf '%s' "$output" | jq -r '.provider // "unknown"')"
@@ -89,7 +97,7 @@ gps_apply_output() {
     gps_set_quality "$GPS_ACC"
 
     printf '%s\n' "$output" > "$STATE_DIR/gps.state.tmp.$$" &&
-    mv -f "$STATE_DIR/gps.state.tmp.$$" "$STATE_DIR/gps.state"
+        mv -f "$STATE_DIR/gps.state.tmp.$$" "$STATE_DIR/gps.state"
 
     GPS_LAST_SOURCE="$GPS_PROVIDER"
 }
@@ -160,6 +168,30 @@ gps_mark_probe() {
     GPS_LAST_PROBE="$(date +%s)"
 }
 
+gps_network_cooldown_active() {
+    local now
+    now="$(date +%s)"
+
+    [ "${GPS_NETWORK_COOLDOWN_UNTIL:-0}" -gt "$now" ]
+}
+
+gps_set_network_cooldown() {
+    local cooldown="${GPS_NETWORK_COOLDOWN:-30}"
+    GPS_NETWORK_COOLDOWN_UNTIL=$(( $(date +%s) + cooldown ))
+}
+
+gps_network_poll_due() {
+    local now elapsed
+    now="$(date +%s)"
+    elapsed=$((now - ${GPS_NETWORK_LAST_POLL:-0}))
+
+    [ "$elapsed" -ge "${GPS_NETWORK_POLL_INTERVAL:-20}" ]
+}
+
+gps_mark_network_poll() {
+    GPS_NETWORK_LAST_POLL="$(date +%s)"
+}
+
 gps_guard() {
     local max_age="${GPS_CACHE_MAX_AGE:-300}"
     local network_max="${GPS_NETWORK_MAX_ACCURACY:-80}"
@@ -176,45 +208,66 @@ gps_guard() {
         return 1
     fi
 
-    # ------------------------------------------------------
-    # 1) Network provider — fast path
-    # ------------------------------------------------------
-
-    if gps_try_provider "network"; then
-
-        gps_apply_output "$GPS_LAST_OUTPUT"
-
-        if awk -v a="$GPS_ACC" "BEGIN { exit !(a <= $network_max) }"; then
-            GPS_STATUS="LIVE_NETWORK"
-            return 0
-        fi
-
-        # Network fix exists, but quality is poor.
-        # Only try GPS when cooldown is inactive.
-        if gps_cooldown_active; then
+    # ==================================================
+    # 1) NETWORK LOCATION
+    #    Poll only every N seconds.
+    # ==================================================
+    if gps_network_cooldown_active; then
+        if gps_load_cache; then
             GPS_STATUS="LIVE_NETWORK_COOLDOWN"
             return 0
         fi
+    elif gps_network_poll_due; then
+        gps_mark_network_poll
 
+        if gps_try_provider "network"; then
+            gps_apply_output "$GPS_LAST_OUTPUT"
+
+            # Good network location is immediately accepted.
+            if awk -v a="$GPS_ACC" "BEGIN { exit !(a <= $network_max) }"; then
+                GPS_STATUS="LIVE_NETWORK"
+                return 0
+            fi
+
+            # Poor network fix: keep it, then allow GPS probe only
+            # according to the normal GPS probe interval.
+            GPS_STATUS="LIVE_NETWORK_PROBE_WAIT"
+        else
+            GPS_API_ERRORS=$((GPS_API_ERRORS + 1))
+
+            # A timeout means Android/Termux:API needs a rest period.
+            if [ "${GPS_LAST_RC:-0}" -eq 124 ]; then
+                GPS_TIMEOUTS=$((GPS_TIMEOUTS + 1))
+                gps_set_network_cooldown
+            fi
+        fi
     else
-        GPS_API_ERRORS=$((GPS_API_ERRORS + 1))
+        # No API call this round.
+        # Reuse the latest location without touching Termux:API.
+        if gps_load_cache; then
+            if [ "$GPS_CACHE_AGE" -le "$max_age" ]; then
+                GPS_STATUS="LIVE_NETWORK_CACHE"
+                return 0
+            fi
+        fi
     fi
 
-    # ------------------------------------------------------
-    # 2) GPS provider — expensive path
-    # ------------------------------------------------------
-
-    if ! gps_cooldown_active && gps_probe_due; then
-
+    # ==================================================
+    # 2) GPS PROVIDER
+    #    Expensive provider is probed only periodically.
+    #    Never probe immediately after a network timeout.
+    # ==================================================
+    if ! gps_network_cooldown_active &&
+       ! gps_cooldown_active &&
+       gps_probe_due
+    then
         gps_mark_probe
 
         if gps_try_provider "gps"; then
-
             gps_apply_output "$GPS_LAST_OUTPUT"
 
             GPS_RECOVERIES=$((GPS_RECOVERIES + 1))
             GPS_STATUS="LIVE_GPS"
-
             return 0
         fi
 
@@ -223,41 +276,23 @@ gps_guard() {
         if [ "${GPS_LAST_RC:-0}" -eq 124 ]; then
             GPS_TIMEOUTS=$((GPS_TIMEOUTS + 1))
             gps_set_cooldown
-
-            # Keep the last network result if available.
-            if [ "$GPS_PROVIDER" = "network" ] &&
-               [ "$GPS_ACC" != "--" ]; then
-                GPS_STATUS="LIVE_NETWORK_GPS_TIMEOUT"
-                return 0
-            fi
         else
             GPS_INVALID=$((GPS_INVALID + 1))
         fi
 
-    else
-        if [ "$GPS_PROVIDER" = "network" ] &&
-           [ "$GPS_ACC" != "--" ]; then
-
-            if gps_cooldown_active; then
-                GPS_STATUS="LIVE_NETWORK_COOLDOWN"
-            else
-                GPS_STATUS="LIVE_NETWORK_PROBE_WAIT"
+        # Keep valid cache if available.
+        if gps_load_cache; then
+            if [ "$GPS_CACHE_AGE" -le "$max_age" ]; then
+                GPS_STATUS="CACHE_FRESH"
+                return 0
             fi
-
-            return 0
-        fi
-
-        if gps_cooldown_active; then
-            GPS_STATUS="GPS_COOLDOWN"
         fi
     fi
 
-    # ------------------------------------------------------
-    # 3) Cache fallback
-    # ------------------------------------------------------
-
+    # ==================================================
+    # 3) EXISTING NETWORK/CACHE RESULT
+    # ==================================================
     if gps_load_cache; then
-
         if [ "$GPS_CACHE_AGE" -le "$max_age" ]; then
             GPS_STATUS="CACHE_FRESH"
             return 0
