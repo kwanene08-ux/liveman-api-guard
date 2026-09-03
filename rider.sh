@@ -274,6 +274,9 @@ if declare -F api_health_overall >/dev/null 2>&1; then
         COOLDOWN)
             API_STATUS="COOLDOWN"
             ;;
+        RECOVERING)
+            API_STATUS="RECOVERING"
+            ;;
         *)
             API_STATUS="$API_HEALTH"
             ;;

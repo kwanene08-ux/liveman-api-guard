@@ -319,8 +319,10 @@ api_cmd_health() {
         return 0
     fi
 
+    # Cooldown หมดแล้ว แต่ยังไม่มี successful request
+    # ให้แสดง RECOVERING จนกว่าจะสำเร็จจริง
     if [ "$failures" -gt 0 ]; then
-        printf 'DEGRADED\n'
+        printf 'RECOVERING\n'
         return 0
     fi
 
@@ -343,9 +345,10 @@ api_health_overall() {
 
     if [ "$loc" = "COOLDOWN" ] && [ "$bat" = "COOLDOWN" ]; then
         printf 'COOLDOWN\n'
-    elif [ "$loc" = "DEGRADED" ] || [ "$bat" = "DEGRADED" ] ||
-         [ "$loc" = "COOLDOWN" ] || [ "$bat" = "COOLDOWN" ]; then
+    elif [ "$loc" = "COOLDOWN" ] || [ "$bat" = "COOLDOWN" ]; then
         printf 'DEGRADED\n'
+    elif [ "$loc" = "RECOVERING" ] || [ "$bat" = "RECOVERING" ]; then
+        printf 'RECOVERING\n'
     else
         printf 'READY\n'
     fi
