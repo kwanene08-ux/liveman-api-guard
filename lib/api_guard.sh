@@ -19,6 +19,13 @@ API_BATTERY_COOLDOWN_FILE="$API_GUARD_STATE_DIR/api_battery_cooldown"
 API_LOCATION_FAIL_FILE="$API_GUARD_STATE_DIR/api_location_failures"
 API_BATTERY_FAIL_FILE="$API_GUARD_STATE_DIR/api_battery_failures"
 
+# ==================================================
+# V8.9.5 GLOBAL API SINGLE-FLIGHT LOCK
+# ==================================================
+
+API_SINGLE_LOCK_DIR="$API_GUARD_STATE_DIR/api_single.lock"
+API_SINGLE_LOCK_WAIT="${API_SINGLE_LOCK_WAIT:-12}"
+
 api_guard_log() {
     local message="$*"
 
@@ -26,6 +33,88 @@ api_guard_log() {
         "$(date '+%Y-%m-%d %H:%M:%S')" \
         "$message" \
         >> "$API_GUARD_LOG_DIR/api_guard.log" 2>/dev/null || true
+}
+
+api_read_number_file() {
+    local file="$1"
+    local value
+
+    value="$(cat "$file" 2>/dev/null || echo 0)"
+
+    case "$value" in
+        ''|*[!0-9]*)
+            echo 0
+            ;;
+        *)
+            echo "$value"
+            ;;
+    esac
+}
+
+api_write_number_file() {
+    local file="$1"
+    local value="$2"
+    local tmp="$file.tmp.$$"
+
+    printf '%s\n' "$value" > "$tmp" 2>/dev/null &&
+        mv -f "$tmp" "$file" 2>/dev/null || true
+}
+
+api_single_lock_acquire() {
+    local waited=0
+    local owner_pid="0"
+
+    while ! mkdir "$API_SINGLE_LOCK_DIR" 2>/dev/null; do
+
+        if [ -s "$API_SINGLE_LOCK_DIR/pid" ]; then
+            owner_pid="$(api_read_number_file "$API_SINGLE_LOCK_DIR/pid")"
+
+            if [ "$owner_pid" -gt 1 ] &&
+               ! kill -0 "$owner_pid" 2>/dev/null
+            then
+                rm -rf "$API_SINGLE_LOCK_DIR" 2>/dev/null || true
+                continue
+            fi
+        fi
+
+        if [ "$waited" -ge "$API_SINGLE_LOCK_WAIT" ]; then
+            api_guard_log "API_SINGLE_LOCK_BUSY waited=${waited}s"
+            return 125
+        fi
+
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    printf '%s\n' "$$" > "$API_SINGLE_LOCK_DIR/pid" 2>/dev/null || true
+
+    api_guard_log "API_SINGLE_LOCK_ACQUIRED pid=$$"
+    return 0
+}
+
+api_single_lock_release() {
+    if [ -d "$API_SINGLE_LOCK_DIR" ]; then
+        rm -f "$API_SINGLE_LOCK_DIR/pid" 2>/dev/null || true
+        rmdir "$API_SINGLE_LOCK_DIR" 2>/dev/null ||
+            rm -rf "$API_SINGLE_LOCK_DIR" 2>/dev/null || true
+
+        api_guard_log "API_SINGLE_LOCK_RELEASED pid=$$"
+    fi
+}
+
+api_single_lock_force_cleanup() {
+    local owner_pid="0"
+
+    if [ -s "$API_SINGLE_LOCK_DIR/pid" ]; then
+        owner_pid="$(api_read_number_file "$API_SINGLE_LOCK_DIR/pid")"
+    fi
+
+    if [ "$owner_pid" -eq "$$" ] ||
+       { [ "$owner_pid" -gt 1 ] &&
+         ! kill -0 "$owner_pid" 2>/dev/null; }
+    then
+        rm -rf "$API_SINGLE_LOCK_DIR" 2>/dev/null || true
+    fi
 }
 
 api_cooldown_file_for_cmd() {
@@ -70,31 +159,6 @@ api_base_cooldown_for_cmd() {
     esac
 }
 
-api_read_number_file() {
-    local file="$1"
-    local value
-
-    value="$(cat "$file" 2>/dev/null || echo 0)"
-
-    case "$value" in
-        ''|*[!0-9]*)
-            echo 0
-            ;;
-        *)
-            echo "$value"
-            ;;
-    esac
-}
-
-api_write_number_file() {
-    local file="$1"
-    local value="$2"
-    local tmp="$file.tmp.$$"
-
-    printf '%s\n' "$value" > "$tmp" 2>/dev/null &&
-        mv -f "$tmp" "$file" 2>/dev/null || true
-}
-
 api_cmd_cooldown_active() {
     local cmd="$1"
     local file
@@ -134,23 +198,12 @@ api_set_cmd_cooldown() {
 
     base="$(api_base_cooldown_for_cmd "$cmd")"
     failures="$(api_read_number_file "$fail_file")"
-
     failures=$((failures + 1))
 
-    # Exponential backoff:
-    # failure 1 = base
-    # failure 2 = base*2
-    # failure 3+ = base*4
     case "$failures" in
-        1)
-            cooldown="$base"
-            ;;
-        2)
-            cooldown=$((base * 2))
-            ;;
-        *)
-            cooldown=$((base * 4))
-            ;;
+        1) cooldown="$base" ;;
+        2) cooldown=$((base * 2)) ;;
+        *) cooldown=$((base * 4)) ;;
     esac
 
     [ "$cooldown" -gt 120 ] && cooldown=120
@@ -169,7 +222,6 @@ api_clear_cmd_failure() {
     local file
 
     file="$(api_failure_file_for_cmd "$cmd")"
-
     [ -n "$file" ] || return 0
 
     rm -f "$file" 2>/dev/null || true
@@ -217,10 +269,7 @@ api_silent() {
     if api_cmd_cooldown_active "$cmd"; then
         API_GUARD_LAST="COOLDOWN"
         API_GUARD_LAST_TIME="$(date '+%H:%M:%S')"
-
-        api_guard_log \
-            "API_COOLDOWN command=$cmd"
-
+        api_guard_log "API_COOLDOWN command=$cmd"
         return 125
     fi
 
@@ -239,11 +288,9 @@ api_silent() {
                 timeout_sec="${API_NETWORK_LOCATION_TIMEOUT:-6}"
             fi
             ;;
-
         termux-battery-status)
             timeout_sec="${API_BATTERY_TIMEOUT:-6}"
             ;;
-
         *)
             timeout_sec="${API_TIMEOUT:-10}"
             ;;
@@ -253,11 +300,14 @@ api_silent() {
         API_GUARD_LAST="COMMAND_MISSING"
         API_GUARD_LAST_TIME="$(date '+%H:%M:%S')"
         API_GUARD_CONSECUTIVE=$((API_GUARD_CONSECUTIVE + 1))
-
-        api_guard_log \
-            "API_COMMAND_MISSING command=$cmd"
-
+        api_guard_log "API_COMMAND_MISSING command=$cmd"
         return 127
+    fi
+
+    if ! api_single_lock_acquire; then
+        API_GUARD_LAST="BUSY"
+        API_GUARD_LAST_TIME="$(date '+%H:%M:%S')"
+        return 125
     fi
 
     timeout \
@@ -269,6 +319,8 @@ api_silent() {
 
     rc=$?
 
+    api_single_lock_release
+
     if [ "$rc" -eq 0 ]; then
         API_GUARD_SUCCESS=$((API_GUARD_SUCCESS + 1))
         API_GUARD_CONSECUTIVE=0
@@ -276,7 +328,6 @@ api_silent() {
         API_GUARD_LAST_TIME="--"
 
         api_clear_cmd_failure "$cmd"
-
         return 0
     fi
 
@@ -285,28 +336,33 @@ api_silent() {
 
     if [ "$rc" -eq 124 ]; then
         API_GUARD_LAST="TIMEOUT"
-
-        api_guard_log \
-            "API_TIMEOUT ${timeout_sec}s command=$cmd $*"
-
+        api_guard_log "API_TIMEOUT ${timeout_sec}s command=$cmd $*"
         api_set_cmd_cooldown "$cmd"
-
     elif [ "$rc" -eq 125 ]; then
         API_GUARD_LAST="COOLDOWN"
-
     else
         API_GUARD_LAST="ERROR"
-
-        api_guard_log \
-            "API_ERROR rc=$rc command=$cmd $*"
+        api_guard_log "API_ERROR rc=$rc command=$cmd $*"
     fi
 
     return "$rc"
 }
 
+api_location() {
+    api_silent termux-location "$@"
+}
+
+api_battery() {
+    api_silent termux-battery-status "$@"
+}
+
 api_cmd_health() {
     local cmd="$1"
-    local cooldown_file fail_file failures now until
+    local cooldown_file
+    local fail_file
+    local failures
+    local now
+    local until
 
     cooldown_file="$(api_cooldown_file_for_cmd "$cmd")"
     fail_file="$(api_failure_file_for_cmd "$cmd")"
@@ -319,8 +375,6 @@ api_cmd_health() {
         return 0
     fi
 
-    # Cooldown หมดแล้ว แต่ยังไม่มี successful request
-    # ให้แสดง RECOVERING จนกว่าจะสำเร็จจริง
     if [ "$failures" -gt 0 ]; then
         printf 'RECOVERING\n'
         return 0
@@ -338,7 +392,8 @@ api_battery_health() {
 }
 
 api_health_overall() {
-    local loc bat
+    local loc
+    local bat
 
     loc="$(api_location_health)"
     bat="$(api_battery_health)"
@@ -352,14 +407,6 @@ api_health_overall() {
     else
         printf 'READY\n'
     fi
-}
-
-api_location() {
-    api_silent termux-location "$@"
-}
-
-api_battery() {
-    api_silent termux-battery-status "$@"
 }
 
 api_guard_status() {
@@ -387,4 +434,6 @@ api_guard_cleanup() {
         "$API_LOCATION_COOLDOWN_FILE.tmp."* \
         "$API_BATTERY_COOLDOWN_FILE.tmp."* \
         2>/dev/null || true
+
+    api_single_lock_force_cleanup
 }
