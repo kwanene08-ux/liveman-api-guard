@@ -59,6 +59,7 @@ source "$ROOT/lib/trend.sh"
 source "$ROOT/lib/alert.sh"
 source "$ROOT/lib/error_guard.sh"
 source "$ROOT/lib/api_guard.sh"
+source "$ROOT/lib/wake_lock.sh"
 
 # ==================================================
 # LOAD ENGINES
@@ -68,6 +69,8 @@ source "$ROOT/engines/gps_guard.sh"
 source "$ROOT/engines/battery_guard.sh"
 source "$ROOT/engines/network_guard.sh"
 source "$ROOT/engines/thermal_guard.sh"
+
+wake_lock_start
 
 # ==================================================
 # LOGGING
@@ -123,6 +126,8 @@ cleanup() {
     fi
 
     STOPPING=1
+
+      wake_lock_stop
 
     printf '\n'
     echo "=================================================="
@@ -438,6 +443,8 @@ show_ui() {
     printf ' TERM Cleanup          : HARDENED\n'
     printf ' Engine Isolation      : ACTIVE\n'
     printf ' Atomic State Write    : ACTIVE\n'
+    printf " Wake Lock             : %s\n" "${WAKE_LOCK_STATUS:-UNKNOWN}"
+
 
     echo
     printf ' State                 : %s\n' "$STATE_DIR"
@@ -455,6 +462,8 @@ show_ui() {
 log "START version=$(cat "$ROOT/VERSION" 2>/dev/null || echo "UNKNOWN") pid=$$"
 
 while true; do
+
+    wake_lock_guard
 
     if [ -f "$STOP_FILE" ]; then
         log "STOP_FILE_DETECTED"
