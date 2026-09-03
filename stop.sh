@@ -184,19 +184,51 @@ rm -f "$STOP_FILE" 2>/dev/null || true
 rm -rf "$LOCK_DIR" 2>/dev/null || true
 
 # ==================================================
+# PRESERVE FINAL RUNTIME COUNTERS
+# ==================================================
+
+state_value() {
+    local key="$1"
+    grep -m1 "^${key}=" "$SYSTEM_FILE" 2>/dev/null |
+        cut -d= -f2-
+}
+
+FINAL_ROUND="$(state_value ROUND)"
+FINAL_HEARTBEAT="$(state_value HEARTBEAT)"
+FINAL_SUCCESS="$(state_value ENGINE_SUCCESS)"
+FINAL_ERRORS="$(state_value ENGINE_ERRORS)"
+FINAL_BUGS="$(state_value BUG_COUNT)"
+FINAL_LAST_ERROR="$(state_value LAST_ERROR)"
+FINAL_REASON="$(state_value REASON)"
+
+FINAL_ROUND="${FINAL_ROUND:-0}"
+FINAL_HEARTBEAT="${FINAL_HEARTBEAT:-0}"
+FINAL_SUCCESS="${FINAL_SUCCESS:-0}"
+FINAL_ERRORS="${FINAL_ERRORS:-0}"
+FINAL_BUGS="${FINAL_BUGS:-0}"
+FINAL_LAST_ERROR="${FINAL_LAST_ERROR:-NONE}"
+FINAL_REASON="${FINAL_REASON:-STOP_COMMAND}"
+
+# ==================================================
 # WRITE FINAL STOPPED STATE
 # ==================================================
 
 NOW="$(date '+%Y-%m-%d %H:%M:%S')"
 
-TMP_STATE="$ROOT/tmp/system.state.stop.$$"
 mkdir -p "$ROOT/tmp"
+TMP_STATE="$ROOT/tmp/system.state.stop.$$"
 
 cat > "$TMP_STATE" <<STATE
 STATUS=STOPPED
 PID=0
+ROUND=$FINAL_ROUND
+HEARTBEAT=$FINAL_HEARTBEAT
 TIME=$NOW
-REASON=STOP_COMMAND
+REASON=$FINAL_REASON
+ENGINE_SUCCESS=$FINAL_SUCCESS
+ENGINE_ERRORS=$FINAL_ERRORS
+BUG_COUNT=$FINAL_BUGS
+LAST_ERROR=$FINAL_LAST_ERROR
 WAKE_LOCK=$WAKE_STATUS
 STATE_OWNER=stop.sh
 STATE

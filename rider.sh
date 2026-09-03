@@ -165,11 +165,16 @@ cleanup() {
 
     atomic_write "$SYSTEM_FILE" \
 "STATUS=STOPPED
-PID=$$
+PID=0
 ROUND=$ROUND
 HEARTBEAT=$HEARTBEAT
 TIME=$(date '+%Y-%m-%d %H:%M:%S')
-REASON=$reason" || true
+REASON=$reason
+ENGINE_SUCCESS=$ENGINE_SUCCESS
+ENGINE_ERRORS=$ENGINE_ERRORS
+BUG_COUNT=$BUG_COUNT
+LAST_ERROR=$LAST_ERROR
+STATE_OWNER=rider.sh" || true
 
     log "CLEANUP_COMPLETE"
 
@@ -281,39 +286,86 @@ run_engine() {
 
 run_engines() {
 
-    # Battery ก่อน เพราะ Thermal ใช้อุณหภูมิจาก Battery
+    # ==================================================
+    # V8.9.2 API ERROR CLASSIFICATION
+    #
+    # API timeout/cooldown + usable cache
+    # = DEGRADED, NOT ENGINE ERROR
+    # ==================================================
 
-    if safe_engine_run "BATTERY" battery_guard; then
+    # --------------------------------------------------
+    # BATTERY
+    # --------------------------------------------------
+    if battery_guard; then
+
         ENGINE_SUCCESS=$((ENGINE_SUCCESS + 1))
-        log "ENGINE_OK name=BATTERY status=${BATTERY_STATUS:-UNSET} pct=${BATTERY_PCT:---}"
+
+        case "${BATTERY_STATUS:-UNSET}" in
+            CACHE|API_COOLDOWN)
+                log "BATTERY_DEGRADED status=${BATTERY_STATUS:-UNSET} pct=${BATTERY_PCT:---} cache_age=${BATTERY_CACHE_AGE:---}"
+                ;;
+            *)
+                log "ENGINE_OK name=BATTERY status=${BATTERY_STATUS:-UNSET} pct=${BATTERY_PCT:---}"
+                ;;
+        esac
+
     else
+
+        # ไม่มี cache/ข้อมูลจริงเลย = engine error จริง
         ENGINE_ERRORS=$((ENGINE_ERRORS + 1))
         set_error "ENGINE_ERROR=BATTERY"
-        log "ENGINE_ERROR name=BATTERY status=${BATTERY_STATUS:-UNSET}"
+        log "BATTERY_ERROR status=${BATTERY_STATUS:-UNSET}"
     fi
 
-    if safe_engine_run "GPS" gps_guard; then
+    # --------------------------------------------------
+    # GPS
+    # --------------------------------------------------
+    if gps_guard; then
+
         ENGINE_SUCCESS=$((ENGINE_SUCCESS + 1))
-        log "GPS_EVENT status=${GPS_STATUS:-UNSET} provider=${GPS_PROVIDER:---} accuracy=${GPS_ACC:---}m cache_age=${GPS_CACHE_AGE:---}s cooldown=${GPS_COOLDOWN_UNTIL:-0} timeouts=${GPS_TIMEOUTS:-0}"
+
+        case "${GPS_STATUS:-UNSET}" in
+            CACHE_FRESH|LIVE_NETWORK_CACHE|LIVE_NETWORK_COOLDOWN|LIVE_NETWORK_PROBE_WAIT)
+                log "GPS_DEGRADED status=${GPS_STATUS:-UNSET} provider=${GPS_PROVIDER:---} accuracy=${GPS_ACC:---}m cache_age=${GPS_CACHE_AGE:---} cooldown=${GPS_COOLDOWN_UNTIL:-0} timeouts=${GPS_TIMEOUTS:-0}"
+                ;;
+            *)
+                log "GPS_EVENT status=${GPS_STATUS:-UNSET} provider=${GPS_PROVIDER:---} accuracy=${GPS_ACC:---}m cache_age=${GPS_CACHE_AGE:---}s cooldown=${GPS_COOLDOWN_UNTIL:-0} timeouts=${GPS_TIMEOUTS:-0}"
+                ;;
+        esac
+
     else
+
+        # cache stale / ไม่มี location จริง = engine error จริง
         ENGINE_ERRORS=$((ENGINE_ERRORS + 1))
         set_error "ENGINE_ERROR=GPS"
-        log "GPS_ERROR status=${GPS_STATUS:-UNSET} provider=${GPS_PROVIDER:---} accuracy=${GPS_ACC:---}m"
+        log "GPS_ERROR status=${GPS_STATUS:-UNSET} provider=${GPS_PROVIDER:---} accuracy=${GPS_ACC:---}m cache_age=${GPS_CACHE_AGE:---}"
     fi
 
+    # --------------------------------------------------
+    # NETWORK
+    # --------------------------------------------------
     if safe_engine_run "NETWORK" network_guard; then
+
         ENGINE_SUCCESS=$((ENGINE_SUCCESS + 1))
         log "NETWORK_EVENT status=${NETWORK_STATUS:-UNSET} ping=${NETWORK_PING:---}ms host=${NETWORK_HOST:---}"
+
     else
+
         ENGINE_ERRORS=$((ENGINE_ERRORS + 1))
         set_error "ENGINE_ERROR=NETWORK"
         log "NETWORK_ERROR status=${NETWORK_STATUS:-UNSET} ping=${NETWORK_PING:---}ms"
     fi
 
+    # --------------------------------------------------
+    # THERMAL
+    # --------------------------------------------------
     if safe_engine_run "THERMAL" thermal_guard; then
+
         ENGINE_SUCCESS=$((ENGINE_SUCCESS + 1))
         log "THERMAL_EVENT status=${THERMAL_STATUS:-UNSET} temp=${THERMAL_TEMP:---}C"
+
     else
+
         ENGINE_ERRORS=$((ENGINE_ERRORS + 1))
         set_error "ENGINE_ERROR=THERMAL"
         log "THERMAL_ERROR status=${THERMAL_STATUS:-UNSET} temp=${THERMAL_TEMP:---}C"
