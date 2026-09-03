@@ -236,6 +236,7 @@ rm -f "$STOP_FILE"
 
 PREFLIGHT="PASS"
 API_STATUS="READY"
+API_HEALTH="READY"
 
 for cmd in \
     bash \
@@ -258,6 +259,25 @@ fi
 
 if ! command -v termux-location >/dev/null 2>&1; then
     API_STATUS="GPS_API_MISSING"
+fi
+
+# Runtime API health is more meaningful than binary presence.
+if declare -F api_health_overall >/dev/null 2>&1; then
+    API_HEALTH="$(api_health_overall)"
+    case "$API_HEALTH" in
+        READY)
+            API_STATUS="READY"
+            ;;
+        DEGRADED)
+            API_STATUS="DEGRADED"
+            ;;
+        COOLDOWN)
+            API_STATUS="COOLDOWN"
+            ;;
+        *)
+            API_STATUS="$API_HEALTH"
+            ;;
+    esac
 fi
 
 # ==================================================
@@ -429,6 +449,11 @@ show_ui() {
     now="$(date +%s)"
     uptime=$((now - START_TIME))
 
+    if declare -F api_health_overall >/dev/null 2>&1; then
+        API_HEALTH="$(api_health_overall)"
+        API_STATUS="$API_HEALTH"
+    fi
+
     clear
 
     echo "=================================================="
@@ -445,7 +470,12 @@ show_ui() {
     echo
 
     printf ' Preflight             : %s\n' "$PREFLIGHT"
+    API_HEALTH_LOCATION="$(api_location_health 2>/dev/null || echo UNKNOWN)"
+    API_HEALTH_BATTERY="$(api_battery_health 2>/dev/null || echo UNKNOWN)"
+
     printf ' Termux:API            : %s\n' "$API_STATUS"
+    printf ' Location API          : %s\n' "$API_HEALTH_LOCATION"
+    printf ' Battery API           : %s\n' "$API_HEALTH_BATTERY"
 
     echo
     echo "---------------- ENGINE STATUS ------------------"

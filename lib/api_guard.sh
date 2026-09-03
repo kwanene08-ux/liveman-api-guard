@@ -304,6 +304,53 @@ api_silent() {
     return "$rc"
 }
 
+api_cmd_health() {
+    local cmd="$1"
+    local cooldown_file fail_file failures now until
+
+    cooldown_file="$(api_cooldown_file_for_cmd "$cmd")"
+    fail_file="$(api_failure_file_for_cmd "$cmd")"
+    failures="$(api_read_number_file "$fail_file")"
+    now="$(date +%s)"
+    until="$(api_read_number_file "$cooldown_file")"
+
+    if [ "$until" -gt "$now" ]; then
+        printf 'COOLDOWN\n'
+        return 0
+    fi
+
+    if [ "$failures" -gt 0 ]; then
+        printf 'DEGRADED\n'
+        return 0
+    fi
+
+    printf 'READY\n'
+}
+
+api_location_health() {
+    api_cmd_health termux-location
+}
+
+api_battery_health() {
+    api_cmd_health termux-battery-status
+}
+
+api_health_overall() {
+    local loc bat
+
+    loc="$(api_location_health)"
+    bat="$(api_battery_health)"
+
+    if [ "$loc" = "COOLDOWN" ] && [ "$bat" = "COOLDOWN" ]; then
+        printf 'COOLDOWN\n'
+    elif [ "$loc" = "DEGRADED" ] || [ "$bat" = "DEGRADED" ] ||
+         [ "$loc" = "COOLDOWN" ] || [ "$bat" = "COOLDOWN" ]; then
+        printf 'DEGRADED\n'
+    else
+        printf 'READY\n'
+    fi
+}
+
 api_location() {
     api_silent termux-location "$@"
 }
