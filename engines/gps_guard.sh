@@ -85,10 +85,41 @@ gps_set_quality() {
 
 gps_apply_output() {
     local output="$1"
+    local new_acc
+    local old_acc="--"
+    local old_provider="--"
+
+    new_acc="$(printf '%s' "$output" | jq -r '.accuracy // "--"')"
+
+    if [ -s "$STATE_DIR/gps.state" ]; then
+        old_acc="$(jq -r '.accuracy // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
+        old_provider="$(jq -r '.provider // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
+    fi
+
+    # V8.9.7:
+    # Do not overwrite a better existing GPS fix with a worse provider result.
+    if [ "$new_acc" != "--" ] &&
+       [ "$old_acc" != "--" ] &&
+       awk -v old="$old_acc" -v new="$new_acc" \
+           'BEGIN { exit !(old < new) }'
+    then
+        GPS_LAT="$(jq -r '.latitude // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
+        GPS_LON="$(jq -r '.longitude // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
+        GPS_ACC="$old_acc"
+        GPS_SPEED="$(jq -r '.speed // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
+        GPS_PROVIDER="$old_provider"
+        GPS_CACHE_AGE="$(gps_cache_age)"
+
+        gps_set_quality "$GPS_ACC"
+
+        GPS_LAST_SOURCE="CACHE_PRESERVED"
+
+        return 0
+    fi
 
     GPS_LAT="$(printf '%s' "$output" | jq -r '.latitude // "--"')"
     GPS_LON="$(printf '%s' "$output" | jq -r '.longitude // "--"')"
-    GPS_ACC="$(printf '%s' "$output" | jq -r '.accuracy // "--"')"
+    GPS_ACC="$new_acc"
     GPS_SPEED="$(printf '%s' "$output" | jq -r '.speed // "--"')"
     GPS_PROVIDER="$(printf '%s' "$output" | jq -r '.provider // "unknown"')"
 

@@ -8,6 +8,40 @@ API_GUARD_LAST_TIME="${API_GUARD_LAST_TIME:---}"
 API_GUARD_LOG_DIR="${LOG_DIR:-${ROOT:-$PWD}/logs}"
 API_GUARD_STATE_DIR="${STATE_DIR:-${ROOT:-$PWD}/state}"
 
+# ==================================================
+# LOAD API CONFIG WHEN THIS LIBRARY IS USED STANDALONE
+# Preserve values already supplied by rider.sh/caller.
+# ==================================================
+
+API_CONFIG_FILE="${ROOT:-$PWD}/config/config.conf"
+
+if [ -f "$API_CONFIG_FILE" ]; then
+    while IFS='=' read -r key value; do
+        case "$key" in
+            API_TIMEOUT|API_RETRIES|API_LOCATION_TIMEOUT|API_BATTERY_TIMEOUT|API_NETWORK_LOCATION_TIMEOUT|API_LOCATION_COOLDOWN|API_BATTERY_COOLDOWN)
+                if [ -z "${!key+x}" ]; then
+                    printf -v "$key" '%s' "$value"
+                fi
+                ;;
+        esac
+    done < <(
+        awk -F= '
+            /^[[:space:]]*#/ { next }
+            /^[[:space:]]*$/ { next }
+            {
+                key=$1
+                value=$0
+                sub(/^[[:space:]]*/, "", key)
+                sub(/[[:space:]]*$/, "", key)
+                sub(/^[^=]*=/, "", value)
+                sub(/^[[:space:]]*/, "", value)
+                sub(/[[:space:]]*$/, "", value)
+                if (key != "") print key "=" value
+            }
+        ' "$API_CONFIG_FILE"
+    )
+fi
+
 mkdir -p "$API_GUARD_LOG_DIR" "$API_GUARD_STATE_DIR" 2>/dev/null || true
 
 API_LOCATION_COOLDOWN="${API_LOCATION_COOLDOWN:-30}"
@@ -18,6 +52,13 @@ API_BATTERY_COOLDOWN_FILE="$API_GUARD_STATE_DIR/api_battery_cooldown"
 
 API_LOCATION_FAIL_FILE="$API_GUARD_STATE_DIR/api_location_failures"
 API_BATTERY_FAIL_FILE="$API_GUARD_STATE_DIR/api_battery_failures"
+
+# V8.9.6 provider isolation
+API_GPS_COOLDOWN_FILE="$API_GUARD_STATE_DIR/api_gps_cooldown"
+API_NETWORK_COOLDOWN_FILE="$API_GUARD_STATE_DIR/api_network_location_cooldown"
+
+API_GPS_FAIL_FILE="$API_GUARD_STATE_DIR/api_gps_failures"
+API_NETWORK_FAIL_FILE="$API_GUARD_STATE_DIR/api_network_location_failures"
 
 # ==================================================
 # V8.9.5 GLOBAL API SINGLE-FLIGHT LOCK
@@ -117,10 +158,40 @@ api_single_lock_force_cleanup() {
     fi
 }
 
-api_cooldown_file_for_cmd() {
-    case "$1" in
+api_provider_for_args() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            network)
+                printf '%s\n' "network"
+                return 0
+                ;;
+            gps)
+                printf '%s\n' "gps"
+                return 0
+                ;;
+        esac
+    done
+    printf '%s\n' "default"
+}
+
+api_cooldown_file_for_request() {
+    local cmd="$1"
+    shift
+
+    case "$cmd" in
         termux-location)
-            printf '%s\n' "$API_LOCATION_COOLDOWN_FILE"
+            case "$(api_provider_for_args "$@")" in
+                gps)
+                    printf '%s\n' "$API_GPS_COOLDOWN_FILE"
+                    ;;
+                network)
+                    printf '%s\n' "$API_NETWORK_COOLDOWN_FILE"
+                    ;;
+                *)
+                    printf '%s\n' "$API_LOCATION_COOLDOWN_FILE"
+                    ;;
+            esac
             ;;
         termux-battery-status)
             printf '%s\n' "$API_BATTERY_COOLDOWN_FILE"
@@ -131,10 +202,23 @@ api_cooldown_file_for_cmd() {
     esac
 }
 
-api_failure_file_for_cmd() {
-    case "$1" in
+api_failure_file_for_request() {
+    local cmd="$1"
+    shift
+
+    case "$cmd" in
         termux-location)
-            printf '%s\n' "$API_LOCATION_FAIL_FILE"
+            case "$(api_provider_for_args "$@")" in
+                gps)
+                    printf '%s\n' "$API_GPS_FAIL_FILE"
+                    ;;
+                network)
+                    printf '%s\n' "$API_NETWORK_FAIL_FILE"
+                    ;;
+                *)
+                    printf '%s\n' "$API_LOCATION_FAIL_FILE"
+                    ;;
+            esac
             ;;
         termux-battery-status)
             printf '%s\n' "$API_BATTERY_FAIL_FILE"
@@ -145,13 +229,26 @@ api_failure_file_for_cmd() {
     esac
 }
 
-api_base_cooldown_for_cmd() {
-    case "$1" in
+api_base_cooldown_for_request() {
+    local cmd="$1"
+    shift
+
+    case "$cmd" in
         termux-location)
-            printf '%s\n' "$API_LOCATION_COOLDOWN"
+            case "$(api_provider_for_args "$@")" in
+                gps)
+                    printf '%s\n' "${API_LOCATION_COOLDOWN:-30}"
+                    ;;
+                network)
+                    printf '%s\n' "${API_LOCATION_COOLDOWN:-30}"
+                    ;;
+                *)
+                    printf '%s\n' "${API_LOCATION_COOLDOWN:-30}"
+                    ;;
+            esac
             ;;
         termux-battery-status)
-            printf '%s\n' "$API_BATTERY_COOLDOWN"
+            printf '%s\n' "${API_BATTERY_COOLDOWN:-30}"
             ;;
         *)
             printf '0\n'
@@ -161,11 +258,13 @@ api_base_cooldown_for_cmd() {
 
 api_cmd_cooldown_active() {
     local cmd="$1"
+    shift
+
     local file
     local now
     local until
 
-    file="$(api_cooldown_file_for_cmd "$cmd")"
+    file="$(api_cooldown_file_for_request "$cmd" "$@")"
 
     [ -n "$file" ] || return 1
     [ -s "$file" ] || return 1
@@ -183,20 +282,25 @@ api_cmd_cooldown_active() {
 
 api_set_cmd_cooldown() {
     local cmd="$1"
+    shift
+
     local file
     local fail_file
     local base
     local failures
     local cooldown
     local until
+    local provider
 
-    file="$(api_cooldown_file_for_cmd "$cmd")"
-    fail_file="$(api_failure_file_for_cmd "$cmd")"
+    provider="$(api_provider_for_args "$@")"
+
+    file="$(api_cooldown_file_for_request "$cmd" "$@")"
+    fail_file="$(api_failure_file_for_request "$cmd" "$@")"
 
     [ -n "$file" ] || return 0
     [ -n "$fail_file" ] || return 0
 
-    base="$(api_base_cooldown_for_cmd "$cmd")"
+    base="$(api_base_cooldown_for_request "$cmd" "$@")"
     failures="$(api_read_number_file "$fail_file")"
     failures=$((failures + 1))
 
@@ -214,14 +318,16 @@ api_set_cmd_cooldown() {
     api_write_number_file "$file" "$until"
 
     api_guard_log \
-        "API_COOLDOWN_SET command=$cmd failures=$failures seconds=$cooldown until=$until"
+        "API_COOLDOWN_SET provider=$provider command=$cmd failures=$failures seconds=$cooldown until=$until"
 }
 
 api_clear_cmd_failure() {
     local cmd="$1"
+    shift
+
     local file
 
-    file="$(api_failure_file_for_cmd "$cmd")"
+    file="$(api_failure_file_for_request "$cmd" "$@")"
     [ -n "$file" ] || return 0
 
     rm -f "$file" 2>/dev/null || true
@@ -236,7 +342,9 @@ api_clear_expired_cooldowns() {
 
     for file in \
         "$API_LOCATION_COOLDOWN_FILE" \
-        "$API_BATTERY_COOLDOWN_FILE"
+        "$API_BATTERY_COOLDOWN_FILE" \
+        "$API_GPS_COOLDOWN_FILE" \
+        "$API_NETWORK_COOLDOWN_FILE"
     do
         [ -s "$file" ] || continue
 
@@ -266,23 +374,18 @@ api_silent() {
 
     api_clear_expired_cooldowns
 
-    if api_cmd_cooldown_active "$cmd"; then
+    provider="$(api_provider_for_args "$@")"
+
+    if api_cmd_cooldown_active "$cmd" "$@"; then
         API_GUARD_LAST="COOLDOWN"
         API_GUARD_LAST_TIME="$(date '+%H:%M:%S')"
-        api_guard_log "API_COOLDOWN command=$cmd"
+        api_guard_log "API_COOLDOWN provider=$provider command=$cmd"
         return 125
     fi
 
     case "$cmd" in
         termux-location)
             timeout_sec="${API_LOCATION_TIMEOUT:-8}"
-
-            for arg in "$@"; do
-                if [ "$arg" = "network" ]; then
-                    provider="network"
-                    break
-                fi
-            done
 
             if [ "$provider" = "network" ]; then
                 timeout_sec="${API_NETWORK_LOCATION_TIMEOUT:-6}"
@@ -300,7 +403,7 @@ api_silent() {
         API_GUARD_LAST="COMMAND_MISSING"
         API_GUARD_LAST_TIME="$(date '+%H:%M:%S')"
         API_GUARD_CONSECUTIVE=$((API_GUARD_CONSECUTIVE + 1))
-        api_guard_log "API_COMMAND_MISSING command=$cmd"
+        api_guard_log "API_COMMAND_MISSING provider=$provider command=$cmd"
         return 127
     fi
 
@@ -327,7 +430,7 @@ api_silent() {
         API_GUARD_LAST="NONE"
         API_GUARD_LAST_TIME="--"
 
-        api_clear_cmd_failure "$cmd"
+        api_clear_cmd_failure "$cmd" "$@"
         return 0
     fi
 
@@ -336,13 +439,15 @@ api_silent() {
 
     if [ "$rc" -eq 124 ]; then
         API_GUARD_LAST="TIMEOUT"
-        api_guard_log "API_TIMEOUT ${timeout_sec}s command=$cmd $*"
-        api_set_cmd_cooldown "$cmd"
+        api_guard_log \
+            "API_TIMEOUT ${timeout_sec}s provider=$provider command=$cmd $*"
+        api_set_cmd_cooldown "$cmd" "$@"
     elif [ "$rc" -eq 125 ]; then
         API_GUARD_LAST="COOLDOWN"
     else
         API_GUARD_LAST="ERROR"
-        api_guard_log "API_ERROR rc=$rc command=$cmd $*"
+        api_guard_log \
+            "API_ERROR rc=$rc provider=$provider command=$cmd $*"
     fi
 
     return "$rc"
