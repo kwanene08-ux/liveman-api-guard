@@ -44,21 +44,22 @@ gps_cache_age() {
         return
     }
 
-    local now mtime
-    now="$(date +%s)"
-    mtime="$(stat -c %Y "$STATE_DIR/gps.state" 2>/dev/null || echo 0)"
+    local now timestamp
 
-    case "$mtime" in
+    now="$(date +%s)"
+    timestamp="$(jq -r '.timestamp // empty' "$STATE_DIR/gps.state" 2>/dev/null || true)"
+
+    case "$timestamp" in
         ''|*[!0-9]*)
             echo "999999"
             return
             ;;
     esac
 
-    if [ "$mtime" -gt "$now" ]; then
+    if [ "$timestamp" -gt "$now" ]; then
         echo "0"
     else
-        echo $((now - mtime))
+        echo $((now - timestamp))
     fi
 }
 
@@ -85,20 +86,29 @@ gps_set_quality() {
 
 gps_apply_output() {
     local output="$1"
+    local requested_provider="${2:-unknown}"
     local new_acc
     local old_acc="--"
     local old_provider="--"
+    local old_timestamp=""
 
     new_acc="$(printf '%s' "$output" | jq -r '.accuracy // "--"')"
 
     if [ -s "$STATE_DIR/gps.state" ]; then
         old_acc="$(jq -r '.accuracy // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
-        old_provider="$(jq -r '.provider // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
+        old_provider="$(jq -r '.source_provider // .provider // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
+        old_timestamp="$(jq -r '.timestamp // empty' "$STATE_DIR/gps.state" 2>/dev/null || true)"
     fi
 
-    # V8.9.7:
-    # Do not overwrite a better existing GPS fix with a worse provider result.
-    if [ "$new_acc" != "--" ] &&
+    # V8.9.9:
+    # The provider we requested is authoritative.
+    # Do NOT trust .provider from Termux:API JSON because it may differ
+    # from the requested provider.
+    #
+    # A worse NETWORK result must never overwrite a better GPS cache.
+    if [ "$requested_provider" = "network" ] &&
+       [ "$old_provider" = "gps" ] &&
+       [ "$new_acc" != "--" ] &&
        [ "$old_acc" != "--" ] &&
        awk -v old="$old_acc" -v new="$new_acc" \
            'BEGIN { exit !(old < new) }'
@@ -107,13 +117,11 @@ gps_apply_output() {
         GPS_LON="$(jq -r '.longitude // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
         GPS_ACC="$old_acc"
         GPS_SPEED="$(jq -r '.speed // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
-        GPS_PROVIDER="$old_provider"
+        GPS_PROVIDER="gps"
         GPS_CACHE_AGE="$(gps_cache_age)"
 
         gps_set_quality "$GPS_ACC"
-
         GPS_LAST_SOURCE="CACHE_PRESERVED"
-
         return 0
     fi
 
@@ -121,16 +129,27 @@ gps_apply_output() {
     GPS_LON="$(printf '%s' "$output" | jq -r '.longitude // "--"')"
     GPS_ACC="$new_acc"
     GPS_SPEED="$(printf '%s' "$output" | jq -r '.speed // "--"')"
-    GPS_PROVIDER="$(printf '%s' "$output" | jq -r '.provider // "unknown"')"
+
+    # Requested provider, not JSON provider.
+    GPS_PROVIDER="$requested_provider"
 
     GPS_CACHE_AGE="0"
-
     gps_set_quality "$GPS_ACC"
 
-    printf '%s\n' "$output" > "$STATE_DIR/gps.state.tmp.$$" &&
-        mv -f "$STATE_DIR/gps.state.tmp.$$" "$STATE_DIR/gps.state"
+    # Only store a fresh cache when the fix is reasonably useful.
+    # GPS/Network fixes worse than 80m are not promoted to the main cache.
+    if [ "$new_acc" != "--" ] &&
+       awk -v a="$new_acc" 'BEGIN { exit !(a <= 80) }'
+    then
+        printf '%s\n' "$output" |
+            jq --arg provider "$requested_provider" \
+               --argjson ts "$(date +%s)" \
+               '. + {timestamp:$ts, source_provider:$provider}' \
+            > "$STATE_DIR/gps.state.tmp.$$" &&
+            mv -f "$STATE_DIR/gps.state.tmp.$$" "$STATE_DIR/gps.state"
+    fi
 
-    GPS_LAST_SOURCE="$GPS_PROVIDER"
+    GPS_LAST_SOURCE="$requested_provider"
 }
 
 gps_try_provider() {
@@ -252,7 +271,16 @@ gps_guard() {
         gps_mark_network_poll
 
         if gps_try_provider "network"; then
-            gps_apply_output "$GPS_LAST_OUTPUT"
+            gps_apply_output "$GPS_LAST_OUTPUT" "network"
+
+            # V8.9.8: a worse network result may be intentionally
+            # rejected in favor of a better existing GPS cache.
+            if [ "${GPS_LAST_SOURCE:-}" = "CACHE_PRESERVED" ]; then
+                if [ "${GPS_CACHE_AGE:-999999}" -le "$max_age" ]; then
+                    GPS_STATUS="GPS_CACHE_PRESERVED"
+                    return 0
+                fi
+            fi
 
             # Good network location is immediately accepted.
             if awk -v a="$GPS_ACC" "BEGIN { exit !(a <= $network_max) }"; then
@@ -295,7 +323,7 @@ gps_guard() {
         gps_mark_probe
 
         if gps_try_provider "gps"; then
-            gps_apply_output "$GPS_LAST_OUTPUT"
+            gps_apply_output "$GPS_LAST_OUTPUT" "gps"
 
             GPS_RECOVERIES=$((GPS_RECOVERIES + 1))
             GPS_STATUS="LIVE_GPS"
