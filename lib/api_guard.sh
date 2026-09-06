@@ -413,6 +413,14 @@ api_silent() {
         return 125
     fi
 
+    # V12: isolate API timeout TERM from rider.sh cleanup trap.
+    # termux-location may receive TERM through timeout; never let that
+    # terminate the parent LIVE MAN supervisor.
+    local saved_term_trap
+    saved_term_trap="$(trap -p TERM || true)"
+
+    trap '' TERM
+
     timeout \
         --signal=TERM \
         --kill-after=2 \
@@ -421,6 +429,12 @@ api_silent() {
         2>>"$API_GUARD_LOG_DIR/api_error.log"
 
     rc=$?
+
+    if [ -n "$saved_term_trap" ]; then
+        eval "$saved_term_trap"
+    else
+        trap - TERM
+    fi
 
     api_single_lock_release
 
