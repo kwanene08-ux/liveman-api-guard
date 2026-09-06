@@ -349,7 +349,7 @@ run_engines() {
         ENGINE_SUCCESS=$((ENGINE_SUCCESS + 1))
 
         case "${GPS_STATUS:-UNSET}" in
-            CACHE_FRESH|LIVE_NETWORK_CACHE|LIVE_NETWORK_COOLDOWN|LIVE_NETWORK_PROBE_WAIT)
+            CACHE_FRESH|LIVE_NETWORK_CACHE|LIVE_NETWORK_COOLDOWN|LIVE_NETWORK_PROBE_WAIT|GPS_DRIFT_REJECTED|GPS_CACHE_PRESERVED)
                 log "GPS_DEGRADED status=${GPS_STATUS:-UNSET} provider=${GPS_PROVIDER:---} accuracy=${GPS_ACC:---}m cache_age=${GPS_CACHE_AGE:---} cooldown=${GPS_COOLDOWN_UNTIL:-0} timeouts=${GPS_TIMEOUTS:-0}"
                 ;;
             *)
