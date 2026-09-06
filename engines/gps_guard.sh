@@ -106,12 +106,14 @@ gps_apply_output() {
     # from the requested provider.
     #
     # A worse NETWORK result must never overwrite a better GPS cache.
+    old_age="$(gps_cache_age)"
+
     if [ "$requested_provider" = "network" ] &&
        [ "$old_provider" = "gps" ] &&
        [ "$new_acc" != "--" ] &&
        [ "$old_acc" != "--" ] &&
-       awk -v old="$old_acc" -v new="$new_acc" \
-           'BEGIN { exit !(old < new) }'
+       [ "$old_age" -le "$max_age" ] &&
+       awk -v old="$old_acc" -v new="$new_acc"            'BEGIN { exit !(old < new) }'
     then
         GPS_LAT="$(jq -r '.latitude // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
         GPS_LON="$(jq -r '.longitude // "--"' "$STATE_DIR/gps.state" 2>/dev/null || echo "--")"
