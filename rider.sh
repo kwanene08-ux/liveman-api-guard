@@ -173,6 +173,7 @@ REASON=$reason
 ENGINE_SUCCESS=$ENGINE_SUCCESS
 ENGINE_ERRORS=$ENGINE_ERRORS
 BUG_COUNT=$BUG_COUNT
+STATE_ERRORS=$STATE_ERRORS
 LAST_ERROR=$LAST_ERROR
 STATE_OWNER=rider.sh" || true
 
@@ -358,10 +359,20 @@ run_engines() {
 
     else
 
-        # cache stale / ไม่มี location จริง = engine error จริง
-        ENGINE_ERRORS=$((ENGINE_ERRORS + 1))
-        set_error "ENGINE_ERROR=GPS"
-        log "GPS_ERROR status=${GPS_STATUS:-UNSET} provider=${GPS_PROVIDER:---} accuracy=${GPS_ACC:---}m cache_age=${GPS_CACHE_AGE:---}"
+        # V8.9.10 HARDENED:
+        # CACHE_STALE is controlled GPS recovery/degraded state.
+        # Do not count repeated stale-cache rounds as engine errors.
+        # Only true no-location / structural failures are errors.
+        case "${GPS_STATUS:-UNSET}" in
+            CACHE_STALE)
+                log "GPS_DEGRADED status=CACHE_STALE provider=${GPS_PROVIDER:---} accuracy=${GPS_ACC:---}m cache_age=${GPS_CACHE_AGE:---} cooldown=${GPS_COOLDOWN_UNTIL:-0} timeouts=${GPS_TIMEOUTS:-0}"
+                ;;
+            *)
+                ENGINE_ERRORS=$((ENGINE_ERRORS + 1))
+                set_error "ENGINE_ERROR=GPS"
+                log "GPS_ERROR status=${GPS_STATUS:-UNSET} provider=${GPS_PROVIDER:---} accuracy=${GPS_ACC:---}m cache_age=${GPS_CACHE_AGE:---}"
+                ;;
+        esac
     fi
 
     # --------------------------------------------------
