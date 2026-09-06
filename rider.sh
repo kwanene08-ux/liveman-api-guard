@@ -562,17 +562,16 @@ log "START version=$(cat "$ROOT/VERSION" 2>/dev/null || echo "UNKNOWN") pid=$$"
 while true; do
 
     # V12 supervisor watchdog
-    if ! watchdog_check; then
-        STATE_ERRORS=$((STATE_ERRORS + 1))
-        log "WATCHDOG_ERROR status=${WATCHDOG_STATUS:-UNKNOWN}"
-    fi
-
+    # Tick first so the current round always has a fresh heartbeat.
     watchdog_tick || {
         STATE_ERRORS=$((STATE_ERRORS + 1))
         log "WATCHDOG_TICK_ERROR"
     }
-
-    wake_lock_guard
+    if ! watchdog_check; then
+        STATE_ERRORS=$((STATE_ERRORS + 1))
+        log "WATCHDOG_ERROR status=${WATCHDOG_STATUS:-UNKNOWN}"
+    fi
+        wake_lock_guard
 
     if [ -f "$STOP_FILE" ]; then
         log "STOP_FILE_DETECTED"

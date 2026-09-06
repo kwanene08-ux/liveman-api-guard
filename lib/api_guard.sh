@@ -483,8 +483,8 @@ api_cmd_health() {
     local now
     local until
 
-    cooldown_file="$(api_cooldown_file_for_cmd "$cmd")"
-    fail_file="$(api_failure_file_for_cmd "$cmd")"
+    cooldown_file="$(api_cooldown_file_for_request "$cmd")"
+    fail_file="$(api_failure_file_for_request "$cmd")"
     failures="$(api_read_number_file "$fail_file")"
     now="$(date +%s)"
     until="$(api_read_number_file "$cooldown_file")"
