@@ -69,6 +69,7 @@ source "$ROOT/engines/gps_guard.sh"
 source "$ROOT/engines/battery_guard.sh"
 source "$ROOT/engines/network_guard.sh"
 source "$ROOT/engines/thermal_guard.sh"
+source "$ROOT/engines/watchdog.sh"
 
 wake_lock_start
 
@@ -430,6 +431,7 @@ THERMAL_STATUS=${THERMAL_STATUS:-UNSET}
 ENGINE_SUCCESS=$ENGINE_SUCCESS
 ENGINE_ERRORS=$ENGINE_ERRORS
 BUG_COUNT=$BUG_COUNT
+STATE_ERRORS=$STATE_ERRORS
 LAST_ERROR=$LAST_ERROR
 ERROR_GUARD_STATUS=$(error_guard_status)
 ERROR_GUARD_TOTAL=${ERROR_GUARD_TOTAL:-0}
@@ -558,6 +560,17 @@ show_ui() {
 log "START version=$(cat "$ROOT/VERSION" 2>/dev/null || echo "UNKNOWN") pid=$$"
 
 while true; do
+
+    # V12 supervisor watchdog
+    if ! watchdog_check; then
+        STATE_ERRORS=$((STATE_ERRORS + 1))
+        log "WATCHDOG_ERROR status=${WATCHDOG_STATUS:-UNKNOWN}"
+    fi
+
+    watchdog_tick || {
+        STATE_ERRORS=$((STATE_ERRORS + 1))
+        log "WATCHDOG_TICK_ERROR"
+    }
 
     wake_lock_guard
 
