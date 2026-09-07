@@ -571,7 +571,7 @@ while true; do
         STATE_ERRORS=$((STATE_ERRORS + 1))
         log "WATCHDOG_ERROR status=${WATCHDOG_STATUS:-UNKNOWN}"
     fi
-        wake_lock_guard
+    wake_lock_guard
 
     if [ -f "$STOP_FILE" ]; then
         log "STOP_FILE_DETECTED"
@@ -583,10 +583,26 @@ while true; do
 
     run_engines
 
-    # Update health values before writing state/UI
+    # V12.2 HEALTH SNAPSHOT
+    # Calculate health only from the completed engine results of this round.
+    # Clear derived values first so a previous round cannot leak into scoring.
+    HEALTH_AVG_PING="--"
+    HEALTH_NET_STABILITY="UNKNOWN"
+    HEALTH_SCORE="0"
+    HEALTH_STATUS="CRITICAL"
+
     HEALTH_AVG_PING="$(network_average_ping)"
     HEALTH_NET_STABILITY="$(network_stability)"
+
     HEALTH_SCORE="$(system_health_score)"
+    case "$HEALTH_SCORE" in
+        ''|*[!0-9]*)
+            HEALTH_SCORE=0
+            STATE_ERRORS=$((STATE_ERRORS + 1))
+            log "HEALTH_SCORE_INVALID"
+            ;;
+    esac
+
     HEALTH_STATUS="$(system_health_status "$HEALTH_SCORE")"
 
     SYSTEM_HEALTH_SCORE="$HEALTH_SCORE"

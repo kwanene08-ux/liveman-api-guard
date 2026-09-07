@@ -72,7 +72,7 @@ gps_health_score() {
             fi
             ;;
 
-        CACHE)
+        CACHE|CACHE_FRESH|GPS_CACHE_PRESERVED)
 
             if [ "$cache_age" != "--" ] &&
                awk -v a="$cache_age" \
@@ -259,11 +259,15 @@ network_stability() {
         return
     fi
 
-    max="$(sort -n "$file" | tail -n 1)"
-    min="$(sort -n "$file" | head -n 1)"
+    max="$(awk '/^[0-9]+([.][0-9]+)?$/ { if (!seen || $1 > max) max=$1; seen=1 } END { if (seen) print max }' "$file")"
+    min="$(awk '/^[0-9]+([.][0-9]+)?$/ { if (!seen || $1 < min) min=$1; seen=1 } END { if (seen) print min }' "$file")"
 
-    diff="$(awk -v a="$max" -v b="$min" \
-        'BEGIN { printf "%.1f", a-b }')"
+    if [ -z "$max" ] || [ -z "$min" ]; then
+        echo "UNKNOWN"
+        return
+    fi
+
+    diff="$(awk -v a="$max" -v b="$min"         'BEGIN { printf "%.1f", a-b }')"
 
     if awk -v d="$diff" 'BEGIN { exit !(d <= 20) }'
     then
