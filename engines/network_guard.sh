@@ -91,12 +91,14 @@ network_guard() {
         NETWORK_BAD_COUNT=$((NETWORK_BAD_COUNT + 1))
 
         if [ -s "$STATE_DIR/network.state" ]; then
+            # Transient loss with usable last-good state:
+            # degraded state, not a structural engine failure.
             NETWORK_STATUS="OFFLINE_CACHE"
+            return 0
         else
             NETWORK_STATUS="OFFLINE"
+            return 1
         fi
-
-        return 1
     fi
 
     NETWORK_PING="$best_ping"
