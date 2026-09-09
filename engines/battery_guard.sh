@@ -113,11 +113,6 @@ battery_guard() {
 
     BATTERY_STATUS="CHECKING"
 
-    if ! have_cmd api_battery; then
-        BATTERY_STATUS="COMMAND_MISSING"
-        return 1
-    fi
-
     if ! have_cmd jq; then
         BATTERY_STATUS="JQ_MISSING"
         return 1
@@ -187,12 +182,15 @@ battery_guard() {
 
     BATTERY_API_ERRORS=$((BATTERY_API_ERRORS + 1))
 
+    # BatteryStatusAPI is allowed to fail transiently.
+    # Preserve the last known-good battery value whenever possible.
     if battery_load_cache; then
         BATTERY_STATUS="CACHE"
         return 0
     fi
 
-    BATTERY_STATUS="API_ERROR"
-
-    return 1
+    # No cache yet: distinguish transient API failure from a hard engine error.
+    # Do not spam retries; battery_api_due() enforces cooldown on later rounds.
+    BATTERY_STATUS="API_DEGRADED"
+    return 0
 }
