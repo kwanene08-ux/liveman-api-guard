@@ -15,6 +15,7 @@ BATTERY_RECOVERIES=0
 
 BATTERY_POLL_INTERVAL="${BATTERY_POLL_INTERVAL:-30}"
 BATTERY_ERROR_COOLDOWN="${BATTERY_ERROR_COOLDOWN:-30}"
+BATTERY_CACHE_MAX_AGE="${BATTERY_CACHE_MAX_AGE:-300}"
 
 BATTERY_LAST_API_TIME=0
 BATTERY_LAST_API_RC=0
@@ -47,7 +48,6 @@ battery_cache_age() {
 
     [ "$age" -lt 0 ] && age=0
 
-    BATTERY_CACHE_AGE="$age"
 
     printf '%s\n' "$age"
 
@@ -55,19 +55,48 @@ battery_cache_age() {
 }
 
 battery_load_cache() {
+
     [ -s "$STATE_DIR/battery.state" ] || return 1
+
+    local age
+
+    age="$(battery_cache_age 2>/dev/null || echo "")"
+    BATTERY_CACHE_AGE="$(battery_cache_age 2>/dev/null || echo --)"
+
+    case "$age" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    BATTERY_CACHE_STALE=0
+    if [ "$age" -gt "${BATTERY_CACHE_MAX_AGE:-300}" ]; then
+        BATTERY_CACHE_STALE=1
+    fi
 
     BATTERY_PCT="$(
         jq -r '.percentage // "--"' \
-        "$STATE_DIR/battery.state" 2>/dev/null || echo "--"
+            "$STATE_DIR/battery.state" 2>/dev/null ||
+        echo "--"
     )"
 
     BATTERY_TEMP="$(
         jq -r '.temperature // "--"' \
-        "$STATE_DIR/battery.state" 2>/dev/null || echo "--"
+            "$STATE_DIR/battery.state" 2>/dev/null ||
+        echo "--"
     )"
 
-    battery_cache_age >/dev/null 2>&1 || return 1
+    case "$BATTERY_PCT" in
+        ''|--|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    case "$BATTERY_TEMP" in
+        ''|--|*[!0-9.-]*)
+            return 1
+            ;;
+    esac
 
     return 0
 }
@@ -130,8 +159,9 @@ battery_guard() {
         fi
 
         # ยังไม่มี cache แต่ยังไม่ถึงเวลา retry
-        BATTERY_STATUS="API_COOLDOWN"
-        return 1
+        # transient API failure ต้องไม่กลายเป็น ENGINE ERROR
+        BATTERY_STATUS="API_DEGRADED"
+        return 0
     fi
 
     # ------------------------------------------------------

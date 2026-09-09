@@ -326,7 +326,7 @@ run_engines() {
         ENGINE_SUCCESS=$((ENGINE_SUCCESS + 1))
 
         case "${BATTERY_STATUS:-UNSET}" in
-            CACHE|API_COOLDOWN)
+            CACHE|API_COOLDOWN|API_DEGRADED)
                 log "BATTERY_DEGRADED status=${BATTERY_STATUS:-UNSET} pct=${BATTERY_PCT:---} cache_age=${BATTERY_CACHE_AGE:---}"
                 ;;
             *)
@@ -505,6 +505,8 @@ show_ui() {
     printf ' Network               : %s\n' "${NETWORK_STATUS:-UNSET}"
     printf ' Ping                  : %sms\n' "${NETWORK_PING:---}"
     printf ' Host                  : %s\n' "${NETWORK_HOST:---}"
+    printf ' Jitter                : %sms\n' "${NETWORK_JITTER:---}"
+    printf ' Packet Loss           : %s%%\n' "${NETWORK_PACKET_LOSS:---}"
 
     printf ' Thermal               : %s\n' "${THERMAL_STATUS:-UNSET}"
     printf ' Temperature           : %s°C\n' "${THERMAL_TEMP:---}"
