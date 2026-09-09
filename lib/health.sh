@@ -241,14 +241,39 @@ network_average_ping() {
 
 network_stability() {
 
+    local ping="${NETWORK_PING:-}"
+    local loss="${NETWORK_PACKET_LOSS:-}"
+    local jitter="${NETWORK_JITTER:-}"
+
+    # Prefer real-time network metrics from the latest probe.
+    if [[ "$ping" =~ ^[0-9]+([.][0-9]+)?$ ]] &&
+       [[ "$loss" =~ ^[0-9]+([.][0-9]+)?$ ]] &&
+       [[ "$jitter" =~ ^[0-9]+([.][0-9]+)?$ ]]
+    then
+
+        # Stable: low loss, low jitter, and acceptable latency.
+        if awk -v p="$ping" -v l="$loss" -v j="$jitter" \
+            'BEGIN { exit !(p <= 50 && l <= 0 && j <= 15) }'
+        then
+            echo "STABLE"
+            return
+        fi
+
+        # Unstable: significant loss, jitter, or very high latency.
+        if awk -v p="$ping" -v l="$loss" -v j="$jitter" \
+            'BEGIN { exit !(p > 120 || l >= 20 || j > 50) }'
+        then
+            echo "UNSTABLE"
+            return
+        fi
+
+        echo "VARIABLE"
+        return
+    fi
+
+    # Fallback to the existing history-based method.
     local file="$STATE_DIR/network.history"
-    local count
-    local avg
-    local max
-    local min
-    local diff
-    local above_warning
-    local above_bad
+    local count avg max min diff above_warning above_bad
 
     if [ ! -s "$file" ]; then
         echo "UNKNOWN"
@@ -266,11 +291,7 @@ network_stability() {
     fi
 
     avg="$(network_average_ping)"
-
-    if [ "$avg" = "--" ]; then
-        echo "UNKNOWN"
-        return
-    fi
+    [ "$avg" = "--" ] && { echo "UNKNOWN"; return; }
 
     max="$(awk '
         /^[0-9]+([.][0-9]+)?$/ {
@@ -288,10 +309,7 @@ network_stability() {
         END { if (seen) print min }
     ' "$file")"
 
-    if [ -z "$max" ] || [ -z "$min" ]; then
-        echo "UNKNOWN"
-        return
-    fi
+    [ -z "$max" ] || [ -z "$min" ] && { echo "UNKNOWN"; return; }
 
     diff="$(awk -v a="$max" -v b="$min" 'BEGIN { printf "%.1f", a-b }')"
 
@@ -309,9 +327,6 @@ network_stability() {
         ' "$file"
     )"
 
-    # Stable:
-    # - ไม่มีค่าเกิน WARNING
-    # - jitter range ไม่เกิน 60 ms
     if [ "${above_warning:-0}" -eq 0 ] &&
        awk -v d="$diff" 'BEGIN { exit !(d <= 60) }'
     then
@@ -319,9 +334,6 @@ network_stability() {
         return
     fi
 
-    # Unstable:
-    # - มี BAD อย่างน้อย 2 ค่า
-    # - หรือมี WARNING หลายครั้งต่อเนื่องใน history
     if [ "${above_bad:-0}" -ge 2 ] ||
        [ "${above_warning:-0}" -ge 4 ] ||
        awk -v d="$diff" 'BEGIN { exit !(d > 120) }'

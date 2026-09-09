@@ -3,6 +3,10 @@
 NETWORK_STATUS="STARTING"
 NETWORK_PING="--"
 NETWORK_HOST="--"
+NETWORK_PACKET_LOSS="--"
+NETWORK_JITTER="--"
+NETWORK_MIN="--"
+NETWORK_MAX="--"
 
 NETWORK_ERRORS=0
 NETWORK_TIMEOUTS=0
@@ -23,6 +27,10 @@ network_guard() {
 
     local best_ping=""
     local best_host=""
+    local best_loss="--"
+    local best_jitter="--"
+    local best_min="--"
+    local best_max="--"
 
     local previous_bad="$NETWORK_BAD_COUNT"
 
@@ -37,51 +45,32 @@ network_guard() {
     fi
 
     for host in $hosts; do
-
-        result="$(timeout "$timeout_sec" \
-            ping -c 1 -W 3 "$host" 2>/dev/null)"
-
+        result="$(timeout "$timeout_sec" ping -c "${NETWORK_PING_COUNT:-5}" -W 3 "$host" 2>/dev/null)"
         rc=$?
 
-        if [ "$rc" -eq 124 ]; then
-            NETWORK_TIMEOUTS=$((NETWORK_TIMEOUTS + 1))
-            continue
-        fi
+        [ "$rc" -eq 124 ] && NETWORK_TIMEOUTS=$((NETWORK_TIMEOUTS + 1)) && continue
+        [ "$rc" -ne 0 ] && continue
 
-        if [ "$rc" -ne 0 ]; then
-            continue
-        fi
+        ping_ms="$(printf '%s\n' "$result" | sed -n 's/.*rtt min\/avg\/max\/mdev = \([^/]*\)\/\([^/]*\)\/\([^/]*\)\/\([^ ]*\).*/\2/p')"
+        min_ms="$(printf '%s\n' "$result" | sed -n 's/.*rtt min\/avg\/max\/mdev = \([^/]*\)\/\([^/]*\)\/\([^/]*\)\/\([^ ]*\).*/\1/p')"
+        max_ms="$(printf '%s\n' "$result" | sed -n 's/.*rtt min\/avg\/max\/mdev = \([^/]*\)\/\([^/]*\)\/\([^ ]*\)\/\([^ ]*\).*/\3/p')"
+        jitter_ms="$(printf '%s\n' "$result" | sed -n 's/.*rtt min\/avg\/max\/mdev = \([^/]*\)\/\([^/]*\)\/\([^/]*\)\/\([^ ]*\).*/\4/p')"
+        loss_pct="$(printf '%s\n' "$result" | sed -n 's/.* received, \([0-9.]*\)% packet loss.*/\1/p')"
 
-        ping_ms="$(printf '%s\n' "$result" |
-            grep -oE 'time[=<][0-9.]+' |
-            head -n 1 |
-            sed 's/^time[=<]//')"
+        [ -z "$ping_ms" ] && continue
+        [ -z "$loss_pct" ] && loss_pct=100
+        [ -z "$jitter_ms" ] && jitter_ms=0
+        [ -z "$min_ms" ] && min_ms="$ping_ms"
+        [ -z "$max_ms" ] && max_ms="$ping_ms"
 
-        if [ -z "$ping_ms" ]; then
-            continue
-        fi
-
-        if ! awk -v p="$ping_ms" \
-            'BEGIN { exit !(p ~ /^[0-9]+([.][0-9]+)?$/) }'
-        then
-            continue
-        fi
-
-        if [ -z "$best_ping" ]; then
-
+        if [ -z "$best_ping" ] || awk -v n="$ping_ms" -v b="$best_ping" 'BEGIN { exit !(n < b) }'; then
             best_ping="$ping_ms"
             best_host="$host"
-
-        elif awk -v n="$ping_ms" \
-                 -v b="$best_ping" \
-                 'BEGIN { exit !(n < b) }'
-        then
-
-            best_ping="$ping_ms"
-            best_host="$host"
-
+            best_loss="$loss_pct"
+            best_jitter="$jitter_ms"
+            best_min="$min_ms"
+            best_max="$max_ms"
         fi
-
     done
 
     # ไม่มี host ไหนตอบ
@@ -103,6 +92,10 @@ network_guard() {
 
     NETWORK_PING="$best_ping"
     NETWORK_HOST="$best_host"
+    NETWORK_PACKET_LOSS="$best_loss"
+    NETWORK_JITTER="$best_jitter"
+    NETWORK_MIN="$best_min"
+    NETWORK_MAX="$best_max"
 
     if declare -F network_history_update >/dev/null 2>&1; then
         network_history_update
@@ -150,6 +143,10 @@ network_guard() {
 'STATUS=%s
 PING=%s
 HOST=%s
+LOSS=%s
+JITTER=%s
+MIN=%s
+MAX=%s
 TIME=%s
 BAD_COUNT=%s
 ERRORS=%s
@@ -160,6 +157,10 @@ LAST_GOOD=%s
         "$NETWORK_STATUS" \
         "$NETWORK_PING" \
         "$NETWORK_HOST" \
+        "$NETWORK_PACKET_LOSS" \
+        "$NETWORK_JITTER" \
+        "$NETWORK_MIN" \
+        "$NETWORK_MAX" \
         "$(date +%s)" \
         "$NETWORK_BAD_COUNT" \
         "$NETWORK_ERRORS" \
