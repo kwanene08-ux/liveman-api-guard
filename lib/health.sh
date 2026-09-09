@@ -242,12 +242,25 @@ network_average_ping() {
 network_stability() {
 
     local file="$STATE_DIR/network.history"
+    local count
     local avg
     local max
     local min
     local diff
+    local above_warning
+    local above_bad
 
     if [ ! -s "$file" ]; then
+        echo "UNKNOWN"
+        return
+    fi
+
+    count="$(awk '
+        /^[0-9]+([.][0-9]+)?$/ { count++ }
+        END { print count+0 }
+    ' "$file")"
+
+    if [ "${count:-0}" -lt 3 ]; then
         echo "UNKNOWN"
         return
     fi
@@ -259,29 +272,66 @@ network_stability() {
         return
     fi
 
-    max="$(awk '/^[0-9]+([.][0-9]+)?$/ { if (!seen || $1 > max) max=$1; seen=1 } END { if (seen) print max }' "$file")"
-    min="$(awk '/^[0-9]+([.][0-9]+)?$/ { if (!seen || $1 < min) min=$1; seen=1 } END { if (seen) print min }' "$file")"
+    max="$(awk '
+        /^[0-9]+([.][0-9]+)?$/ {
+            if (!seen || $1 > max) max=$1
+            seen=1
+        }
+        END { if (seen) print max }
+    ' "$file")"
+
+    min="$(awk '
+        /^[0-9]+([.][0-9]+)?$/ {
+            if (!seen || $1 < min) min=$1
+            seen=1
+        }
+        END { if (seen) print min }
+    ' "$file")"
 
     if [ -z "$max" ] || [ -z "$min" ]; then
         echo "UNKNOWN"
         return
     fi
 
-    diff="$(awk -v a="$max" -v b="$min"         'BEGIN { printf "%.1f", a-b }')"
+    diff="$(awk -v a="$max" -v b="$min" 'BEGIN { printf "%.1f", a-b }')"
 
-    if awk -v d="$diff" 'BEGIN { exit !(d <= 20) }'
+    above_warning="$(
+        awk -v w="${PING_WARNING:-120}" '
+            /^[0-9]+([.][0-9]+)?$/ && $1 > w { count++ }
+            END { print count+0 }
+        ' "$file"
+    )"
+
+    above_bad="$(
+        awk -v b="${PING_BAD:-250}" '
+            /^[0-9]+([.][0-9]+)?$/ && $1 > b { count++ }
+            END { print count+0 }
+        ' "$file"
+    )"
+
+    # Stable:
+    # - ไม่มีค่าเกิน WARNING
+    # - jitter range ไม่เกิน 60 ms
+    if [ "${above_warning:-0}" -eq 0 ] &&
+       awk -v d="$diff" 'BEGIN { exit !(d <= 60) }'
     then
         echo "STABLE"
-
-    elif awk -v d="$diff" 'BEGIN { exit !(d <= 60) }'
-    then
-        echo "VARIABLE"
-
-    else
-        echo "UNSTABLE"
+        return
     fi
-}
 
+    # Unstable:
+    # - มี BAD อย่างน้อย 2 ค่า
+    # - หรือมี WARNING หลายครั้งต่อเนื่องใน history
+    if [ "${above_bad:-0}" -ge 2 ] ||
+       [ "${above_warning:-0}" -ge 4 ] ||
+       awk -v d="$diff" 'BEGIN { exit !(d > 120) }'
+    then
+        echo "UNSTABLE"
+        return
+    fi
+
+    echo "VARIABLE"
+}
 
 system_health_score() {
 
