@@ -72,8 +72,19 @@ engine_start() {
     local name="$1"
     local file="$ENGINE_DIR/$name.sh"
     local pid_file
+    local pid
 
     pid_file="$(engine_pid_file "$name")"
+
+    # Prevent duplicate engine processes
+    if engine_running "$name"; then
+        pid="$(tr -cd '0-9' < "$pid_file" 2>/dev/null || true)"
+        log "ENGINE_ALREADY_RUNNING name=$name pid=$pid"
+        return 0
+    fi
+
+    # Remove stale PID file before starting
+    rm -f "$pid_file" 2>/dev/null || true
 
     if [ ! -f "$file" ]; then
 
