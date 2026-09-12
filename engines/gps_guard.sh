@@ -273,27 +273,47 @@ gps_apply_output() {
 gps_try_provider() {
     local provider="$1"
     local output rc
+    local retries="${GPS_RETRIES:-1}"
+    local attempt=0
 
-    output="$(
-        api_location \
-            -p "$provider" \
-            -r once \
-            2>/dev/null
-    )"
+    case "$retries" in
+        ''|*[!0-9]*) retries=1 ;;
+    esac
 
-    rc=$?
+    while :; do
+        output="$(
+            api_location \
+                -p "$provider" \
+                -r once \
+                2>/dev/null
+        )"
 
-    GPS_LAST_RC="$rc"
-    GPS_LAST_OUTPUT="$output"
+        rc=$?
 
-    if [ "$rc" -eq 0 ] &&
-       [ -n "$output" ] &&
-       gps_valid_json "$output"
-    then
-        return 0
-    fi
+        GPS_LAST_RC="$rc"
+        GPS_LAST_OUTPUT="$output"
 
-    return 1
+        if [ "$rc" -eq 0 ] &&
+           [ -n "$output" ] &&
+           gps_valid_json "$output"
+        then
+            return 0
+        fi
+
+        # Retry only on timeout.
+        # Do not repeat invalid/API errors because those should
+        # immediately enter the existing fallback/cooldown logic.
+        if [ "$provider" = "gps" ] &&
+           [ "$rc" -eq 124 ] &&
+           [ "$attempt" -lt "$retries" ]
+        then
+            attempt=$((attempt + 1))
+            sleep 0.2
+            continue
+        fi
+
+        return 1
+    done
 }
 
 gps_load_cache() {
