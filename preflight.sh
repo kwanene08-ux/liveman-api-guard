@@ -69,7 +69,7 @@ echo
 echo "===== TERMUX:API GPS ====="
 
 if command -v termux-location >/dev/null 2>&1 &&
-   timeout 10 termux-location -p gps >"$GPS_JSON" 2>"$GPS_ERR"
+   timeout 15 termux-location -p gps >"$GPS_JSON" 2>"$GPS_ERR"
 then
     if jq -e '
         type == "object"
