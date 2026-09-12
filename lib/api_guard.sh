@@ -385,7 +385,7 @@ api_silent() {
 
     case "$cmd" in
         termux-location)
-            timeout_sec="${API_LOCATION_TIMEOUT:-8}"
+            timeout_sec="${API_LOCATION_TIMEOUT:-15}"
 
             if [ "$provider" = "network" ]; then
                 timeout_sec="${API_NETWORK_LOCATION_TIMEOUT:-6}"
