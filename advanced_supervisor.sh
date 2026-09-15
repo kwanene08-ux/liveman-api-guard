@@ -220,7 +220,30 @@ write_state() {
     local pid hb age status now
 
     pid="$(rider_pid)"
-    hb="$(awk -F= '$1=="HEARTBEAT"{print $2; exit}' "$HEARTBEAT_FILE" 2>/dev/null || echo 0)"
+    hb="$(awk -F= '
+        $1=="HEARTBEAT" { print $2; found=1; exit }
+        END {
+            if (!found) {
+                if ($0 ~ /^[0-9]+$/) print $0
+                else print 0
+            }
+        }
+    ' "$HEARTBEAT_FILE" 2>/dev/null || echo 0)"
+
+    # Fallback: system.state is authoritative when heartbeat.state
+    # contains only a timestamp/legacy format.
+    if ! case "$hb" in ''|*[!0-9]*) false ;; esac; then
+        hb=0
+    fi
+
+    if [ "$hb" -eq 0 ] && [ -f "$SYSTEM_FILE" ]; then
+        sys_hb="$(awk -F= '$1=="HEARTBEAT"{print $2; exit}' "$SYSTEM_FILE" 2>/dev/null || true)"
+        case "$sys_hb" in
+            ''|*[!0-9]*) ;;
+            *) hb="$sys_hb" ;;
+        esac
+    fi
+
     age="$(heartbeat_age)"
     status="$(awk -F= '$1=="STATUS"{print $2; exit}' "$SYSTEM_FILE" 2>/dev/null || echo UNKNOWN)"
     now="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -243,7 +266,30 @@ show_status() {
     local pid hb age status
 
     pid="$(rider_pid)"
-    hb="$(awk -F= '$1=="HEARTBEAT"{print $2; exit}' "$HEARTBEAT_FILE" 2>/dev/null || echo 0)"
+    hb="$(awk -F= '
+        $1=="HEARTBEAT" { print $2; found=1; exit }
+        END {
+            if (!found) {
+                if ($0 ~ /^[0-9]+$/) print $0
+                else print 0
+            }
+        }
+    ' "$HEARTBEAT_FILE" 2>/dev/null || echo 0)"
+
+    # Fallback: system.state is authoritative when heartbeat.state
+    # contains only a timestamp/legacy format.
+    if ! case "$hb" in ''|*[!0-9]*) false ;; esac; then
+        hb=0
+    fi
+
+    if [ "$hb" -eq 0 ] && [ -f "$SYSTEM_FILE" ]; then
+        sys_hb="$(awk -F= '$1=="HEARTBEAT"{print $2; exit}' "$SYSTEM_FILE" 2>/dev/null || true)"
+        case "$sys_hb" in
+            ''|*[!0-9]*) ;;
+            *) hb="$sys_hb" ;;
+        esac
+    fi
+
     age="$(heartbeat_age)"
     status="$(awk -F= '$1=="STATUS"{print $2; exit}' "$SYSTEM_FILE" 2>/dev/null || echo UNKNOWN)"
 
