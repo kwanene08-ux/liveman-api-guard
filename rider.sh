@@ -231,6 +231,18 @@ fi
 printf '%s\n' "$$" > "$PID_FILE"
 
 rm -f "$STOP_FILE"
+# V12.3.4 BACKGROUND HEARTBEAT
+# Keep heartbeat fresh while run_engines() is busy.
+# The helper watches this Rider PID and exits automatically when Rider exits.
+if ! pgrep -P $$ -f "V12.3.4_HEARTBEAT_LOOP" >/dev/null 2>&1; then
+    (
+        while kill -0 $$ 2>/dev/null; do
+            watchdog_tick >/dev/null 2>&1 || true
+            sleep 5
+        done
+    ) &
+    HEARTBEAT_LOOP_PID=$!
+fi
 
 # ==================================================
 # PREFLIGHT
