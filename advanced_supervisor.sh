@@ -15,12 +15,12 @@ SUP_LOCK="$STATE_DIR/advanced_supervisor.lock"
 RIDER_PID_FILE="$STATE_DIR/rider.pid"
 HEARTBEAT_FILE="$STATE_DIR/heartbeat.state"
 SYSTEM_FILE="$STATE_DIR/system.state"
-STOP_FILE="$STATE_DIR/stop.request"
 
 INTERVAL="${SUPERVISOR_INTERVAL:-5}"
 HEARTBEAT_TIMEOUT="${SUPERVISOR_HEARTBEAT_TIMEOUT:-45}"
 MAX_RESTARTS="${SUPERVISOR_MAX_RESTARTS:-8}"
 RESTART_BACKOFF="${SUPERVISOR_RESTART_BACKOFF:-3}"
+START_WAIT="${SUPERVISOR_START_WAIT:-15}"
 AUTO_RESTART="${SUPERVISOR_AUTO_RESTART:-true}"
 
 STOPPING=0
@@ -46,36 +46,49 @@ atomic_write() {
     mv -f "$tmp" "$file" || return 1
 }
 
-read_kv() {
-    local file="$1"
-    local key="$2"
-
-    [ -f "$file" ] || return 1
-
-    awk -F= -v k="$key" '
-        $1 == k {
-            sub(/^[^=]*=/, "")
-            print
-            exit
-        }
-    ' "$file"
-}
-
 rider_pid() {
     local pid=""
 
-    if [ -f "$RIDER_PID_FILE" ]; then
-        pid="$(tr -cd '0-9' < "$RIDER_PID_FILE" 2>/dev/null || true)"
-    fi
+    [ -f "$RIDER_PID_FILE" ] || {
+        printf '0\n'
+        return
+    }
+
+    pid="$(tr -cd '0-9' < "$RIDER_PID_FILE" 2>/dev/null || true)"
+
+    [ -n "$pid" ] || pid=0
 
     printf '%s\n' "$pid"
 }
 
 pid_alive() {
-    local pid="${1:-}"
+    local pid="${1:-0}"
 
-    [ -n "$pid" ] || return 1
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    [ "$pid" -gt 0 ] || return 1
+
     kill -0 "$pid" 2>/dev/null
+}
+
+pid_is_rider() {
+    local pid="${1:-0}"
+
+    pid_alive "$pid" || return 1
+
+    local cmd=""
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+
+    case "$cmd" in
+        *rider.sh*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 heartbeat_age() {
@@ -97,15 +110,44 @@ heartbeat_age() {
     echo $((now - mt))
 }
 
-stop_rider() {
-    local pid="${1:-}"
+wait_for_rider_pid() {
+    local wait_s="$START_WAIT"
+    local i pid
 
-    [ -n "$pid" ] || return 0
+    case "$wait_s" in
+        ''|*[!0-9]*) wait_s=15 ;;
+    esac
+
+    i=0
+
+    while [ "$i" -lt "$wait_s" ]; do
+        pid="$(rider_pid)"
+
+        if pid_is_rider "$pid"; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+
+        sleep 1
+        i=$((i + 1))
+    done
+
+    return 1
+}
+
+stop_rider() {
+    local pid="${1:-0}"
+
+    if ! pid_is_rider "$pid"; then
+        return 0
+    fi
+
+    log "RIDER_STOP pid=$pid"
 
     kill -TERM "$pid" 2>/dev/null || true
 
     for _ in 1 2 3 4 5; do
-        pid_alive "$pid" || return 0
+        pid_is_rider "$pid" || return 0
         sleep 1
     done
 
@@ -113,29 +155,39 @@ stop_rider() {
 }
 
 start_rider() {
-    rm -f "$STOP_FILE" 2>/dev/null || true
+    local launched_pid rider_pid_found
+
+    rm -f "$RIDER_PID_FILE"
+    rm -f "$HEARTBEAT_FILE"
 
     nohup "$ROOT/rider.sh" \
         >> "$LOG_DIR/advanced_rider.stdout.log" 2>&1 &
 
-    local pid=$!
+    launched_pid=$!
 
-    log "RIDER_START pid=$pid"
+    log "RIDER_LAUNCH shell_pid=$launched_pid"
 
-    sleep 1
+    rider_pid_found="$(wait_for_rider_pid 2>/dev/null || true)"
 
-    if pid_alive "$pid"; then
+    if [ -n "$rider_pid_found" ] &&
+       pid_is_rider "$rider_pid_found"
+    then
+        log "RIDER_READY pid=$rider_pid_found"
         return 0
     fi
 
-    log "RIDER_START_FAILED pid=$pid"
+    log "RIDER_START_FAILED shell_pid=$launched_pid"
+
+    if pid_alive "$launched_pid"; then
+        kill -TERM "$launched_pid" 2>/dev/null || true
+    fi
+
     return 1
 }
 
 restart_rider() {
     local reason="$1"
-    local pid
-    local delay
+    local pid delay
 
     if [ "$RESTARTS" -ge "$MAX_RESTARTS" ]; then
         LAST_REASON="RESTART_LIMIT"
@@ -149,7 +201,7 @@ restart_rider() {
     LAST_RESTART="$(date +%s)"
     LAST_REASON="$reason"
 
-    log "RESTART_EVENT count=$RESTARTS reason=$reason old_pid=${pid:-0}"
+    log "RESTART_EVENT count=$RESTARTS reason=$reason pid=${pid:-0}"
 
     stop_rider "$pid"
 
@@ -168,15 +220,16 @@ write_state() {
     local pid hb age status now
 
     pid="$(rider_pid)"
-    hb="$(read_kv "$HEARTBEAT_FILE" HEARTBEAT 2>/dev/null || echo 0)"
+    hb="$(awk -F= '$1=="HEARTBEAT"{print $2; exit}' "$HEARTBEAT_FILE" 2>/dev/null || echo 0)"
     age="$(heartbeat_age)"
-    status="$(read_kv "$SYSTEM_FILE" STATUS 2>/dev/null || echo UNKNOWN)"
+    status="$(awk -F= '$1=="STATUS"{print $2; exit}' "$SYSTEM_FILE" 2>/dev/null || echo UNKNOWN)"
     now="$(date '+%Y-%m-%d %H:%M:%S')"
 
     atomic_write "$SUP_STATE" \
 "STATUS=RUNNING
 SUPERVISOR_PID=$$
 RIDER_PID=${pid:-0}
+RIDER_PROCESS=$(pid_is_rider "$pid" && echo ALIVE || echo DOWN)
 RIDER_STATUS=$status
 HEARTBEAT=${hb:-0}
 HEARTBEAT_AGE=$age
@@ -187,32 +240,23 @@ TIME=$now"
 }
 
 show_status() {
-    local pid hb age status score
+    local pid hb age status
 
     pid="$(rider_pid)"
-    hb="$(read_kv "$HEARTBEAT_FILE" HEARTBEAT 2>/dev/null || echo 0)"
+    hb="$(awk -F= '$1=="HEARTBEAT"{print $2; exit}' "$HEARTBEAT_FILE" 2>/dev/null || echo 0)"
     age="$(heartbeat_age)"
-    status="$(read_kv "$SYSTEM_FILE" STATUS 2>/dev/null || echo UNKNOWN)"
-
-    score="$(
-        grep -o 'health=[0-9]*' \
-            "$LOG_DIR/current.log" 2>/dev/null |
-        tail -1 |
-        cut -d= -f2 || true
-    )"
-
-    [ -n "$score" ] || score="--"
+    status="$(awk -F= '$1=="STATUS"{print $2; exit}' "$SYSTEM_FILE" 2>/dev/null || echo UNKNOWN)"
 
     clear
 
     echo "=================================================="
-    echo " LIVE MAN ADVANCED SUPERVISOR"
+    echo " LIVE MAN ADVANCED SUPERVISOR v12.3.1"
     echo "=================================================="
 
     printf ' Supervisor PID        : %s\n' "$$"
     printf ' Rider PID             : %s\n' "${pid:-0}"
 
-    if pid_alive "${pid:-0}"; then
+    if pid_is_rider "$pid"; then
         printf ' Rider Process         : ALIVE\n'
     else
         printf ' Rider Process         : DOWN\n'
@@ -221,11 +265,12 @@ show_status() {
     printf ' Rider State           : %s\n' "$status"
     printf ' Heartbeat             : %s\n' "${hb:-0}"
     printf ' Heartbeat Age         : %ss\n' "$age"
-    printf ' Health Score Latest   : %s\n' "$score"
     printf ' Restarts              : %s/%s\n' "$RESTARTS" "$MAX_RESTARTS"
     printf ' Last Restart Reason   : %s\n' "$LAST_REASON"
     printf ' Auto Restart          : %s\n' "$AUTO_RESTART"
     printf ' Heartbeat Timeout     : %ss\n' "$HEARTBEAT_TIMEOUT"
+    printf ' Start Synchronization : ACTIVE\n'
+    printf ' PID Identity Check    : ACTIVE\n'
 
     echo
     echo "---------------- ADVANCED PROTECTION -------------"
@@ -235,10 +280,8 @@ show_status() {
     echo " Restart Backoff       : ACTIVE"
     echo " Restart Limit         : ACTIVE"
     echo " Atomic Supervisor     : ACTIVE"
-
     echo
     echo " Ctrl+C = หยุด Supervisor"
-    echo " Rider จะไม่ถูกหยุดเมื่อกด Ctrl+C"
     echo "=================================================="
 }
 
@@ -270,36 +313,35 @@ if [ -d "$SUP_LOCK" ]; then
     exit 1
 fi
 
-if ! mkdir "$SUP_LOCK" 2>/dev/null; then
-    echo "ERROR: SUPERVISOR LOCK"
-    exit 1
-fi
+mkdir "$SUP_LOCK" || exit 1
 
-if [ ! -x "$ROOT/rider.sh" ]; then
-    echo "ERROR: rider.sh ไม่มี execute permission"
-    chmod +x "$ROOT/rider.sh" 2>/dev/null || true
-fi
+chmod +x "$ROOT/rider.sh"
 
-log "SUPERVISOR_START version=$(cat "$ROOT/VERSION" 2>/dev/null || echo UNKNOWN)"
+log "SUPERVISOR_START version=v12.3.1"
 
-if ! pid_alive "$(rider_pid)"; then
-    if [ "$AUTO_RESTART" = "true" ]; then
-        start_rider || true
-    fi
+pid="$(rider_pid)"
+
+if pid_is_rider "$pid"; then
+    log "EXISTING_RIDER_ACCEPTED pid=$pid"
+elif [ "$AUTO_RESTART" = "true" ]; then
+    start_rider || {
+        log "INITIAL_RIDER_START_FAILED"
+    }
 fi
 
 while true; do
+
     pid="$(rider_pid)"
     age="$(heartbeat_age)"
 
-    if ! pid_alive "$pid"; then
+    if ! pid_is_rider "$pid"; then
         if [ "$AUTO_RESTART" = "true" ]; then
-            restart_rider "RIDER_PROCESS_DOWN" || sleep "$INTERVAL"
+            restart_rider "RIDER_PROCESS_DOWN" || true
         fi
 
     elif [ "$age" -gt "$HEARTBEAT_TIMEOUT" ]; then
         if [ "$AUTO_RESTART" = "true" ]; then
-            restart_rider "HEARTBEAT_STALE_${age}s" || sleep "$INTERVAL"
+            restart_rider "HEARTBEAT_STALE_${age}s" || true
         fi
     fi
 
