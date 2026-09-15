@@ -236,13 +236,14 @@ write_state() {
         hb=0
     fi
 
-    if [ "$hb" -eq 0 ] && [ -f "$SYSTEM_FILE" ]; then
-        sys_hb="$(awk -F= '$1=="HEARTBEAT"{print $2; exit}' "$SYSTEM_FILE" 2>/dev/null || true)"
-        case "$sys_hb" in
-            ''|*[!0-9]*) ;;
-            *) hb="$sys_hb" ;;
-        esac
-    fi
+    # UI heartbeat must use Rider's logical heartbeat counter.
+    # heartbeat.state may contain a legacy Unix timestamp.
+    sys_hb="$(awk -F= '$1=="HEARTBEAT"{print $2; exit}' "$SYSTEM_FILE" 2>/dev/null || true)"
+
+    case "$sys_hb" in
+        ''|*[!0-9]*) ;;
+        *) hb="$sys_hb" ;;
+    esac
 
     age="$(heartbeat_age)"
     status="$(awk -F= '$1=="STATUS"{print $2; exit}' "$SYSTEM_FILE" 2>/dev/null || echo UNKNOWN)"
@@ -296,7 +297,7 @@ show_status() {
     clear
 
     echo "=================================================="
-    echo " LIVE MAN ADVANCED SUPERVISOR v12.3.1"
+    echo " LIVE MAN ADVANCED SUPERVISOR $(cat "$ROOT/VERSION" 2>/dev/null || echo UNKNOWN)"
     echo "=================================================="
 
     printf ' Supervisor PID        : %s\n' "$$"
