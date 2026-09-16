@@ -364,7 +364,7 @@ mkdir "$SUP_LOCK" || exit 1
 
 chmod +x "$ROOT/rider.sh"
 
-log "SUPERVISOR_START version=v12.3.1"
+log "SUPERVISOR_START version=$(cat "$ROOT/VERSION" 2>/dev/null || echo UNKNOWN)"
 
 pid="$(rider_pid)"
 
