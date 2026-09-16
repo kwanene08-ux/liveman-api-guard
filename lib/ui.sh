@@ -5,7 +5,7 @@ show_ui() {
     clear
 
     printf '==================================================\n'
-    printf ' LIVE MAN API GUARD %s\n' "$VERSION"
+    printf ' LIVE MAN API GUARD Advanced+ %s\n' "$VERSION"
     printf '==================================================\n\n'
 
     printf ' Round            : #%s\n' "$ROUND"

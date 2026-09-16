@@ -4,150 +4,170 @@ set -u
 set -o pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-
 STATE_DIR="$ROOT/state"
-PID_FILE="$STATE_DIR/rider.pid"
+LOG_DIR="$ROOT/logs"
+
+RIDER_PID_FILE="$STATE_DIR/rider.pid"
+SUP_PID_FILE="$STATE_DIR/supervisor.pid"
 STOP_FILE="$STATE_DIR/stop.request"
 LOCK_DIR="$STATE_DIR/rider.lock"
+SUP_LOCK_DIR="$STATE_DIR/advanced_supervisor.lock"
 SYSTEM_FILE="$STATE_DIR/system.state"
 
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$LOG_DIR"
 
 echo "=================================================="
-echo " 🔴 LIVE MAN API GUARD STOP"
+echo " 🔴 LIVE MAN API GUARD STOP ALL"
 echo "=================================================="
 
-# ==================================================
-# SAFE EXACT RIDER DISCOVERY
-# ไม่ใช้ pgrep -f
-# และไม่ให้นับ awk/stop.sh ตัวเอง
-# ==================================================
-
-get_rider_pids() {
-    local self="$$"
-
-    ps -eo pid=,args= 2>/dev/null |
-    awk -v root="$ROOT/rider.sh" -v self="$self" '
-        $1 != self &&
-        $2 ~ /(^|\/)(bash|sh)$/ &&
-        index($0, root) &&
-        $0 !~ /awk -v root=/ {
-            print $1
-        }
-    '
+valid_pid() {
+    case "${1:-}" in
+        ''|*[!0-9]*) return 1 ;;
+        0) return 1 ;;
+        *) return 0 ;;
+    esac
 }
 
-# ==================================================
-# READ PID FILE
-# ==================================================
+cmdline() {
+    local pid="$1"
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true
+}
 
-PID=""
+is_supervisor() {
+    local pid="${1:-0}"
+    kill -0 "$pid" 2>/dev/null || return 1
+    case "$(cmdline "$pid")" in
+        *advanced_supervisor.sh*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
-if [ -f "$PID_FILE" ]; then
-    PID="$(tr -cd '0-9' < "$PID_FILE" 2>/dev/null || true)"
-fi
+is_rider() {
+    local pid="${1:-0}"
+    kill -0 "$pid" 2>/dev/null || return 1
+    case "$(cmdline "$pid")" in
+        *rider.sh*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
-# ขอให้ rider cleanup ตัวเองก่อน
-touch "$STOP_FILE"
+read_pid() {
+    local file="$1"
+    local p=""
+    [ -f "$file" ] || return 0
+    p="$(tr -cd '0-9' < "$file" 2>/dev/null || true)"
+    printf '%s\n' "$p"
+}
 
-# ==================================================
-# PRIMARY STOP
-# ==================================================
+wait_dead() {
+    local pid="$1"
+    local seconds="${2:-10}"
 
-if [ -n "$PID" ] && [ "$PID" != "$$" ] && kill -0 "$PID" 2>/dev/null; then
-
-    echo "Rider PID : $PID"
-    echo "Sending INT..."
-
-    kill -INT "$PID" 2>/dev/null || true
-
-    # รอ graceful cleanup สูงสุด 8 วินาที
-    for _ in 1 2 3 4 5 6 7 8; do
-        if ! kill -0 "$PID" 2>/dev/null; then
-            break
-        fi
+    for _ in $(seq 1 "$seconds"); do
+        kill -0 "$pid" 2>/dev/null || return 0
         sleep 1
     done
 
-    # TERM
-    if kill -0 "$PID" 2>/dev/null; then
-        echo "Sending TERM..."
-        kill -TERM "$PID" 2>/dev/null || true
+    return 1
+}
 
-        for _ in 1 2 3 4; do
-            if ! kill -0 "$PID" 2>/dev/null; then
-                break
-            fi
-            sleep 1
-        done
+# --------------------------------------------------
+# Stop request first
+# --------------------------------------------------
+
+touch "$STOP_FILE"
+
+# --------------------------------------------------
+# 1) STOP ADVANCED SUPERVISOR FIRST
+#    เพื่อป้องกัน AUTO_RESTART rider
+# --------------------------------------------------
+
+SUP_PID="$(read_pid "$SUP_PID_FILE")"
+
+if valid_pid "$SUP_PID" && is_supervisor "$SUP_PID"; then
+    echo "Supervisor PID : $SUP_PID"
+    echo "Sending TERM to supervisor..."
+    kill -TERM "$SUP_PID" 2>/dev/null || true
+
+    if wait_dead "$SUP_PID" 10; then
+        echo "Supervisor     : STOPPED"
+    else
+        echo "Supervisor     : FORCE KILL"
+        kill -KILL "$SUP_PID" 2>/dev/null || true
     fi
-
-    # KILL
-    if kill -0 "$PID" 2>/dev/null; then
-        echo "Sending KILL..."
-        kill -KILL "$PID" 2>/dev/null || true
-    fi
-
-elif [ -n "$PID" ]; then
-    echo "Rider PID not running: $PID"
 else
-    echo "No active rider PID"
+    echo "Supervisor     : NOT ACTIVE"
 fi
 
-# ==================================================
-# CLEAN ANY REMAINING EXACT RIDER
-# ==================================================
+# --------------------------------------------------
+# 2) STOP RIDER
+# --------------------------------------------------
+
+RIDER_PID="$(read_pid "$RIDER_PID_FILE")"
+
+if valid_pid "$RIDER_PID" && is_rider "$RIDER_PID"; then
+    echo "Rider PID      : $RIDER_PID"
+    echo "Sending INT..."
+    kill -INT "$RIDER_PID" 2>/dev/null || true
+
+    if wait_dead "$RIDER_PID" 8; then
+        echo "Rider          : STOPPED"
+    else
+        echo "Sending TERM..."
+        kill -TERM "$RIDER_PID" 2>/dev/null || true
+
+        if ! wait_dead "$RIDER_PID" 4; then
+            echo "Rider          : FORCE KILL"
+            kill -KILL "$RIDER_PID" 2>/dev/null || true
+        fi
+    fi
+else
+    echo "Rider          : NOT ACTIVE"
+fi
+
+# --------------------------------------------------
+# 3) CLEAN EXACT REMAINING PROJECT PROCESSES
+#    ไม่ใช้ pkill -f แบบกว้าง
+# --------------------------------------------------
 
 echo
-echo "Checking remaining rider processes..."
+echo "===== FINAL PROCESS CLEANUP ====="
 
-PIDS="$(get_rider_pids || true)"
+for P in $(ps -ef 2>/dev/null | awk -v root="$ROOT" '
+    $2 ~ /^[0-9]+$/ &&
+    index($0, root) &&
+    ($0 ~ /advanced_supervisor\.sh/ || $0 ~ /rider\.sh/) {
+        print $2
+    }
+'); do
+    [ "$P" = "$$" ] && continue
 
-if [ -n "$PIDS" ]; then
-    for P in $PIDS; do
-        [ "$P" = "$$" ] && continue
-
-        if kill -0 "$P" 2>/dev/null; then
-            echo "Cleaning leftover rider PID: $P"
-            kill -TERM "$P" 2>/dev/null || true
-        fi
-    done
-fi
-
-# รอให้ทุกตัวหายก่อน
-for _ in 1 2 3 4 5; do
-    PIDS="$(get_rider_pids || true)"
-    [ -z "$PIDS" ] && break
-    sleep 1
+    if is_supervisor "$P" || is_rider "$P"; then
+        echo "Cleaning PID : $P"
+        kill -TERM "$P" 2>/dev/null || true
+    fi
 done
 
-# บังคับครั้งสุดท้าย
-PIDS="$(get_rider_pids || true)"
+sleep 2
 
-if [ -n "$PIDS" ]; then
-    for P in $PIDS; do
-        [ "$P" = "$$" ] && continue
+for P in $(ps -ef 2>/dev/null | awk -v root="$ROOT" '
+    $2 ~ /^[0-9]+$/ &&
+    index($0, root) &&
+    ($0 ~ /advanced_supervisor\.sh/ || $0 ~ /rider\.sh/) {
+        print $2
+    }
+'); do
+    [ "$P" = "$$" ] && continue
 
-        if kill -0 "$P" 2>/dev/null; then
-            echo "Force cleaning rider PID: $P"
-            kill -KILL "$P" 2>/dev/null || true
-        fi
-    done
-fi
-
-# ==================================================
-# FINAL PROCESS WAIT
-# ==================================================
-
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-    PIDS="$(get_rider_pids || true)"
-    [ -z "$PIDS" ] && break
-    sleep 1
+    if is_supervisor "$P" || is_rider "$P"; then
+        echo "Force cleaning PID : $P"
+        kill -KILL "$P" 2>/dev/null || true
+    fi
 done
 
-# ==================================================
-# WAKE LOCK RELEASE
-# ==================================================
+# --------------------------------------------------
+# 4) WAKE LOCK RELEASE
+# --------------------------------------------------
 
 if command -v termux-wake-unlock >/dev/null 2>&1; then
     termux-wake-unlock >/dev/null 2>&1 || true
@@ -156,36 +176,39 @@ else
     WAKE_STATUS="UNAVAILABLE"
 fi
 
-# ==================================================
-# FINAL PROCESS CHECK
-# ==================================================
+# --------------------------------------------------
+# 5) VERIFY NO PROJECT PROCESS REMAINS
+# --------------------------------------------------
 
-PIDS="$(get_rider_pids || true)"
+REMAINING="$(ps -ef 2>/dev/null | awk -v root="$ROOT" '
+    index($0, root) &&
+    ($0 ~ /advanced_supervisor\.sh/ || $0 ~ /rider\.sh/) {
+        print
+    }
+')"
 
-if [ -n "$PIDS" ]; then
-    echo
-    echo "===== VERIFY ====="
+echo
+echo "===== VERIFY ====="
+
+if [ -n "$REMAINING" ]; then
+    echo "$REMAINING"
     echo "STATUS : FAIL"
-    echo "Rider process still exists"
-
-    for P in $PIDS; do
-        ps -p "$P" -o pid=,ppid=,stat=,args= 2>/dev/null || true
-    done
-
     exit 1
 fi
 
-# ==================================================
-# CLEAN RUNTIME FILES
-# ==================================================
+# --------------------------------------------------
+# 6) CLEAN STATE FILES
+# --------------------------------------------------
 
-rm -f "$PID_FILE" 2>/dev/null || true
+rm -f "$RIDER_PID_FILE" 2>/dev/null || true
+rm -f "$SUP_PID_FILE" 2>/dev/null || true
 rm -f "$STOP_FILE" 2>/dev/null || true
 rm -rf "$LOCK_DIR" 2>/dev/null || true
+rm -rf "$SUP_LOCK_DIR" 2>/dev/null || true
 
-# ==================================================
-# PRESERVE FINAL RUNTIME COUNTERS
-# ==================================================
+# --------------------------------------------------
+# 7) PRESERVE COUNTERS
+# --------------------------------------------------
 
 state_value() {
     local key="$1"
@@ -199,7 +222,6 @@ FINAL_SUCCESS="$(state_value ENGINE_SUCCESS)"
 FINAL_ERRORS="$(state_value ENGINE_ERRORS)"
 FINAL_BUGS="$(state_value BUG_COUNT)"
 FINAL_LAST_ERROR="$(state_value LAST_ERROR)"
-FINAL_REASON="$(state_value REASON)"
 
 FINAL_ROUND="${FINAL_ROUND:-0}"
 FINAL_HEARTBEAT="${FINAL_HEARTBEAT:-0}"
@@ -207,16 +229,11 @@ FINAL_SUCCESS="${FINAL_SUCCESS:-0}"
 FINAL_ERRORS="${FINAL_ERRORS:-0}"
 FINAL_BUGS="${FINAL_BUGS:-0}"
 FINAL_LAST_ERROR="${FINAL_LAST_ERROR:-NONE}"
-FINAL_REASON="${FINAL_REASON:-STOP_COMMAND}"
-
-# ==================================================
-# WRITE FINAL STOPPED STATE
-# ==================================================
 
 NOW="$(date '+%Y-%m-%d %H:%M:%S')"
+TMP_STATE="$ROOT/tmp/system.state.stop.$$"
 
 mkdir -p "$ROOT/tmp"
-TMP_STATE="$ROOT/tmp/system.state.stop.$$"
 
 cat > "$TMP_STATE" <<STATE
 STATUS=STOPPED
@@ -224,7 +241,7 @@ PID=0
 ROUND=$FINAL_ROUND
 HEARTBEAT=$FINAL_HEARTBEAT
 TIME=$NOW
-REASON=$FINAL_REASON
+REASON=STOP_COMMAND
 ENGINE_SUCCESS=$FINAL_SUCCESS
 ENGINE_ERRORS=$FINAL_ERRORS
 BUG_COUNT=$FINAL_BUGS
@@ -235,54 +252,14 @@ STATE
 
 mv -f "$TMP_STATE" "$SYSTEM_FILE"
 
-# ==================================================
-# FINAL VERIFY
-# ==================================================
-
-FINAL_COUNT=0
-FINAL_PIDS="$(get_rider_pids || true)"
-
-for P in $FINAL_PIDS; do
-    [ -n "$P" ] && FINAL_COUNT=$((FINAL_COUNT + 1))
-done
-
-echo
-echo "===== VERIFY ====="
-echo "ENGINE_COUNT : $FINAL_COUNT"
-
-if [ "$FINAL_COUNT" -ne 0 ]; then
-    echo "STATUS : FAIL"
-    exit 1
-fi
-
-if [ -e "$PID_FILE" ]; then
-    echo "PID_FILE : FAIL"
-    exit 1
-fi
-
-if [ -e "$LOCK_DIR" ]; then
-    echo "LOCK : FAIL"
-    exit 1
-fi
-
-grep -q '^STATUS=STOPPED$' "$SYSTEM_FILE" || {
-    echo "STATE : FAIL"
-    exit 1
-}
-
-grep -q '^PID=0$' "$SYSTEM_FILE" || {
-    echo "STATE_PID : FAIL"
-    exit 1
-}
-
 echo "STATUS       : STOPPED"
 echo "PID_FILE     : CLEAR"
+echo "SUPERVISOR   : CLEAR"
 echo "LOCK         : CLEAR"
 echo "WAKE_LOCK    : $WAKE_STATUS"
-echo "STATE_PID    : 0"
 echo "PROCESS      : NONE"
 
 echo
 echo "=================================================="
-echo " ✅ STOP COMPLETE"
+echo " ✅ STOP ALL COMPLETE"
 echo "=================================================="

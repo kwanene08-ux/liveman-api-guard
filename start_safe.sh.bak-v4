@@ -1,0 +1,215 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+
+ROOT="$HOME/LIVE_MAN_API_GUARD"
+STATE="$ROOT/state"
+
+PID_FILE="$STATE/rider.pid"
+SUP_PID_FILE="$STATE/supervisor.pid"
+
+START_LOCK="$STATE/start_safe.lock"
+SUP="$ROOT/advanced_supervisor.sh"
+
+mkdir -p "$STATE"
+
+log() {
+    printf '%s | SAFE_START | %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$*" \
+        >> "$ROOT/logs/start_safe.log"
+}
+
+pid_alive() {
+    [ -n "${1:-}" ] &&
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac &&
+    kill -0 "$1" 2>/dev/null
+}
+
+is_supervisor_pid() {
+    local pid="${1:-}"
+    pid_alive "$pid" || return 1
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+        grep -Fq "$ROOT/advanced_supervisor.sh"
+}
+
+is_rider_pid() {
+    local pid="${1:-}"
+    pid_alive "$pid" || return 1
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+        grep -Fq "$ROOT/rider.sh"
+}
+
+find_supervisor_pids() {
+    pgrep -f "$ROOT/advanced_supervisor.sh" 2>/dev/null || true
+}
+
+find_rider_pids() {
+    pgrep -f "$ROOT/rider.sh" 2>/dev/null || true
+}
+
+cleanup_stale_start_lock() {
+    if [ -d "$START_LOCK" ]; then
+        local lock_pid=""
+        lock_pid="$(cat "$START_LOCK/pid" 2>/dev/null || true)"
+
+        if [ -n "$lock_pid" ] && pid_alive "$lock_pid"; then
+            echo "START already running : $lock_pid"
+            exit 0
+        fi
+
+        rm -rf "$START_LOCK" 2>/dev/null || true
+    fi
+}
+
+echo "=================================================="
+echo " LIVE MAN SAFE START v4 SINGLE INSTANCE"
+echo "=================================================="
+
+mkdir -p "$ROOT/logs"
+
+cleanup_stale_start_lock
+
+if ! mkdir "$START_LOCK" 2>/dev/null; then
+    echo "START already in progress"
+    log "START_LOCK_BUSY"
+    exit 0
+fi
+
+echo "$$" > "$START_LOCK/pid"
+
+cleanup() {
+    rm -rf "$START_LOCK" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+if [ ! -f "$SUP" ]; then
+    echo "ERROR: advanced_supervisor.sh not found"
+    log "SUPERVISOR_NOT_FOUND"
+    exit 1
+fi
+
+# --------------------------------------------------
+# ตรวจ Supervisor
+# --------------------------------------------------
+SUP_PIDS="$(find_supervisor_pids)"
+
+VALID_SUP=""
+for PID in $SUP_PIDS; do
+    if is_supervisor_pid "$PID"; then
+        if [ -z "$VALID_SUP" ]; then
+            VALID_SUP="$PID"
+        else
+            echo "ERROR: Multiple Supervisor detected"
+            echo "PID: $VALID_SUP"
+            echo "PID: $PID"
+            log "MULTIPLE_SUPERVISOR pid1=$VALID_SUP pid2=$PID"
+            exit 2
+        fi
+    fi
+done
+
+if [ -n "$VALID_SUP" ]; then
+    echo "$VALID_SUP" > "$SUP_PID_FILE"
+    echo "Supervisor Already Running : $VALID_SUP"
+    log "EXISTING_SUPERVISOR pid=$VALID_SUP"
+    exit 0
+fi
+
+# --------------------------------------------------
+# ตรวจ Rider ที่ยังค้างอยู่
+# --------------------------------------------------
+RIDER_PIDS="$(find_rider_pids)"
+
+VALID_RIDER=""
+for PID in $RIDER_PIDS; do
+    if is_rider_pid "$PID"; then
+        if [ -z "$VALID_RIDER" ]; then
+            VALID_RIDER="$PID"
+        else
+            echo "ERROR: Multiple Rider detected"
+            echo "PID: $VALID_RIDER"
+            echo "PID: $PID"
+            log "MULTIPLE_RIDER pid1=$VALID_RIDER pid2=$PID"
+            exit 3
+        fi
+    fi
+done
+
+if [ -n "$VALID_RIDER" ]; then
+    echo "$VALID_RIDER" > "$PID_FILE"
+    echo "Existing Rider Detected : $VALID_RIDER"
+    log "EXISTING_RIDER_ADOPT pid=$VALID_RIDER"
+else
+    rm -f "$PID_FILE"
+fi
+
+# --------------------------------------------------
+# Launch Supervisor
+# --------------------------------------------------
+nohup bash "$SUP" \
+    >> "$ROOT/logs/advanced_supervisor.stdout.log" 2>&1 &
+
+NEW_SUP="$!"
+
+echo "$NEW_SUP" > "$SUP_PID_FILE"
+
+echo "Supervisor Launch : STARTED"
+echo "Supervisor PID    : $NEW_SUP"
+
+log "SUPERVISOR_LAUNCH pid=$NEW_SUP"
+
+# --------------------------------------------------
+# รอ Supervisor
+# --------------------------------------------------
+READY=0
+
+for _ in $(seq 1 20); do
+    sleep 0.25
+
+    if is_supervisor_pid "$NEW_SUP"; then
+        READY=1
+        break
+    fi
+done
+
+if [ "$READY" -ne 1 ]; then
+    echo "ERROR: Supervisor failed to stay alive"
+    log "SUPERVISOR_START_FAILED pid=$NEW_SUP"
+    rm -f "$SUP_PID_FILE"
+    exit 4
+fi
+
+# --------------------------------------------------
+# Final duplicate verification
+# --------------------------------------------------
+FINAL_SUP="$(find_supervisor_pids)"
+
+COUNT=0
+ONLY_SUP=""
+
+for PID in $FINAL_SUP; do
+    if is_supervisor_pid "$PID"; then
+        COUNT=$((COUNT + 1))
+        ONLY_SUP="$PID"
+    fi
+done
+
+if [ "$COUNT" -ne 1 ]; then
+    echo "ERROR: Supervisor duplicate verification FAILED"
+    echo "Supervisor count : $COUNT"
+    log "DUPLICATE_VERIFY_FAILED count=$COUNT"
+    exit 5
+fi
+
+echo "$ONLY_SUP" > "$SUP_PID_FILE"
+
+echo "Duplicate Scan      : PASS"
+echo "Supervisor Count    : 1"
+echo "Supervisor PID      : $ONLY_SUP"
+echo "Rider PID Source    : rider.pid"
+echo "=================================================="
+
+log "START_PASS supervisor=$ONLY_SUP"
+
+exit 0
